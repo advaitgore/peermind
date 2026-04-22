@@ -1,0 +1,40 @@
+services:
+  latex:
+    build:
+      context: .
+      dockerfile: docker/latex.Dockerfile
+    image: peermind-latex:local
+    # This image is pulled by the backend to compile LaTeX.
+    # The backend shells out to `docker run --rm -v ... peermind-latex:local latexmk ...`
+    # so this service exists only to build and tag the image.
+    command: ["true"]
+    profiles: ["build-only"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: peermind-backend:local
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - peermind_jobs:/tmp/peermind_jobs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - latex
+
+  frontend:
+    build:
+      context: ./frontend
+    image: peermind-frontend:local
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  peermind_jobs:

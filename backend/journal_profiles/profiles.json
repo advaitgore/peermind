@@ -1,0 +1,56 @@
+{
+  "neurips": {
+    "full_name": "NeurIPS",
+    "criteria": ["soundness", "significance", "novelty", "correctness", "clarity", "prior_work"],
+    "score_range": [1, 10],
+    "strong_accept_threshold": 8,
+    "reviewer_guidelines_summary": "NeurIPS values technically sound, novel ML contributions. Score 1-10 on soundness, significance, novelty, correctness, clarity, and relation to prior work. Strong Reject=1-3, Reject=4-5, Borderline=6, Accept=7, Strong Accept=8-10.",
+    "persona_skeptic_inject": "Be especially rigorous about empirical claims — check error bars, significance tests, ablations. Missing baselines are a hard reject signal. Demand reproducibility detail: seeds, hyperparameter sweeps, hardware. If a claim is made in the abstract but not directly demonstrated by a controlled experiment in the paper, call it out.",
+    "persona_champion_inject": "Look for theoretical elegance and practical impact. NeurIPS values both. Recognize when a simple, well-motivated idea with careful empirical validation deserves acceptance even if not revolutionary."
+  },
+  "icml": {
+    "full_name": "ICML",
+    "criteria": ["technical_quality", "novelty", "significance", "clarity", "reproducibility"],
+    "score_range": [1, 10],
+    "strong_accept_threshold": 8,
+    "reviewer_guidelines_summary": "ICML values novel, technically sound ML research with clear writing and reproducible results. Open-source code, clear experimental protocols, and honest reporting of negative results are all valued.",
+    "persona_skeptic_inject": "Check reproducibility carefully. Is the code available? Do reported numbers match the experimental setup? Watch for cherry-picked seeds and missing ablations.",
+    "persona_champion_inject": "Recognize incremental but carefully executed work. Solid empirical contributions with clear writing deserve acceptance. Value well-documented negative results."
+  },
+  "iclr": {
+    "full_name": "ICLR",
+    "criteria": ["technical_quality", "novelty", "reproducibility", "clarity", "significance"],
+    "score_range": [1, 10],
+    "strong_accept_threshold": 8,
+    "reviewer_guidelines_summary": "ICLR uses open peer review. Reproducibility and clear empirical methodology are critical. The community values representation learning and deep learning insights, and rewards papers that open new directions.",
+    "persona_skeptic_inject": "ICLR reviewers are known for high standards on experimental methodology. Check whether results are cherry-picked or if evaluation is comprehensive across tasks/scales/seeds.",
+    "persona_champion_inject": "ICLR values insight and ideas that open new directions, even if execution is imperfect. Prioritize novelty of perspective over incremental benchmark gains."
+  },
+  "nature": {
+    "full_name": "Nature",
+    "criteria": ["scientific_rigor", "novelty", "broad_interest", "clarity", "reproducibility"],
+    "score_range": [1, 4],
+    "strong_accept_threshold": 4,
+    "reviewer_guidelines_summary": "Nature requires outstanding scientific advances of broad interest. Papers must present a major breakthrough with rigorous methodology and clear significance beyond the immediate field. Reviewers recommend reject, major revision, minor revision, or accept.",
+    "persona_skeptic_inject": "Nature's bar is 'significant advance of broad interest.' Challenge whether non-specialists would care. Is this truly novel or an incremental improvement? Any retraction risk must be flagged.",
+    "persona_champion_inject": "Look for genuinely transformative findings. Imperfect presentation can be revised; fundamental novelty cannot be added post-hoc. Consider broader scientific and societal implications."
+  },
+  "science": {
+    "full_name": "Science",
+    "criteria": ["scientific_rigor", "novelty", "broad_appeal", "significance", "clarity"],
+    "score_range": [1, 4],
+    "strong_accept_threshold": 4,
+    "reviewer_guidelines_summary": "Science seeks papers of exceptional scientific importance and broad interdisciplinary interest. Methodology must be impeccable and significance clear to a general scientific audience. Recommendations: reject, major revision, minor revision, accept.",
+    "persona_skeptic_inject": "Would a scientist outside this field understand the significance? Is the methodology beyond reproach? Science cannot afford retractions — hold the bar for causal claims especially high.",
+    "persona_champion_inject": "Great Science papers shift paradigms. Look for the unexpected finding that changes how we think. Connect the work to cross-disciplinary implications the authors may have understated."
+  },
+  "arxiv": {
+    "full_name": "arXiv (Preprint)",
+    "criteria": ["technical_correctness", "reproducibility", "clarity", "contribution"],
+    "score_range": [1, 5],
+    "strong_accept_threshold": 4,
+    "reviewer_guidelines_summary": "Evaluate as a preprint for community feedback. No formal accept/reject — produce detailed feedback for revision. Focus on correctness, reproducibility, and clarity of contribution.",
+    "persona_skeptic_inject": "Flag any claims that cannot be verified from the paper alone. Identify what would need to happen before this should be submitted to a peer-reviewed venue. Note which claims are overstated.",
+    "persona_champion_inject": "Identify what makes this preprint worth reading and what the community will find valuable immediately. Recommend specific venues where the work would fit after targeted revisions."
+  }
+}
