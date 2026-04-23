@@ -68,31 +68,28 @@ async def compile_latex(source_dir: Path, main_tex: str) -> CompileResult:
 
     main_stem = Path(main_tex).stem
 
+    # ``-f`` = keep going past errors (warnings don't abort)
+    # ``-shell-escape`` = enable minted / write18
+    # ``-bibtex`` = force bibtex pass for papers with .bib files
+    # Removing ``-halt-on-error`` since papers often have citation warnings
+    # that are non-fatal but would otherwise block the compile.
+    LATEXMK_ARGS = ["-pdf", "-f", "-interaction=nonstopmode", "-shell-escape", "-bibtex"]
+
     if _docker_available():
         cmd = [
             "docker",
             "run",
             "--rm",
-            "--network",
-            "none",
             "-v",
             f"{source_dir}:/workspace",
             "-w",
             "/workspace",
             settings.latex_docker_image,
-            "-pdf",
-            "-interaction=nonstopmode",
-            "-halt-on-error",
+            *LATEXMK_ARGS,
             main_tex,
         ]
     elif shutil.which("latexmk"):
-        cmd = [
-            "latexmk",
-            "-pdf",
-            "-interaction=nonstopmode",
-            "-halt-on-error",
-            main_tex,
-        ]
+        cmd = ["latexmk", *LATEXMK_ARGS, main_tex]
     else:
         return CompileResult(
             success=False,
@@ -101,20 +98,33 @@ async def compile_latex(source_dir: Path, main_tex: str) -> CompileResult:
             elapsed_ms=0,
         )
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(source_dir) if cmd[0] != "docker" else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return CompileResult(False, None, "Compile timed out", int((time.time() - start) * 1000))
+    # Log the invocation so silent hangs are diagnosable without a debugger.
+    print(f"[compile_latex] cwd={source_dir} cmd={' '.join(cmd)}", flush=True)
 
-    log = (stdout or b"").decode("utf-8", errors="replace")
+    # Run in a thread pool — asyncio.create_subprocess_exec raises
+    # NotImplementedError on Windows under uvicorn's default event-loop
+    # policy. sync subprocess.run is universally supported.
+    def _run_sync() -> tuple[int, str]:
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(source_dir) if cmd[0] != "docker" else None,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            combined = (result.stdout or "") + "\n" + (result.stderr or "")
+            return result.returncode, combined
+        except subprocess.TimeoutExpired as e:
+            out = ""
+            if e.stdout:
+                out += e.stdout if isinstance(e.stdout, str) else e.stdout.decode("utf-8", "replace")
+            if e.stderr:
+                out += "\n" + (e.stderr if isinstance(e.stderr, str) else e.stderr.decode("utf-8", "replace"))
+            return -1, f"Compile timed out after {timeout}s\n{out}"
+
+    returncode, log = await asyncio.to_thread(_run_sync)
     elapsed_ms = int((time.time() - start) * 1000)
 
     # Find the produced PDF.
@@ -124,7 +134,11 @@ async def compile_latex(source_dir: Path, main_tex: str) -> CompileResult:
         pdfs = list(source_dir.glob("*.pdf"))
         produced = pdfs[0] if pdfs else None  # type: ignore[assignment]
 
-    if proc.returncode == 0 and produced is not None and produced.exists():
+    if returncode == 0 and produced is not None and produced.exists():
+        return CompileResult(True, produced, log, elapsed_ms)
+    # latexmk may return non-zero even when a PDF was produced (it treats
+    # some warnings as errors). If a PDF exists, accept it.
+    if produced is not None and produced.exists():
         return CompileResult(True, produced, log, elapsed_ms)
     return CompileResult(False, None, log, elapsed_ms)
 

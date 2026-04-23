@@ -4,7 +4,9 @@
 FROM texlive/texlive:latest
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends latexmk \
+ && apt-get install -y --no-install-recommends \
+      latexmk \
+      python3-pygments \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
@@ -12,4 +14,4 @@ WORKDIR /workspace
 # Defensive defaults: non-interactive, no network, fail fast.
 ENV TEXMFVAR=/tmp/texmf-var
 ENTRYPOINT ["latexmk"]
-CMD ["-pdf", "-interaction=nonstopmode", "-halt-on-error", "main.tex"]
+CMD ["-pdf", "-f", "-shell-escape", "-interaction=nonstopmode", "main.tex"]

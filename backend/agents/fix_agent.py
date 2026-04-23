@@ -11,10 +11,14 @@ from .skills import load_skill
 def build_fix_agent_spec() -> AgentSpec:
     skill = load_skill("fix_agent")
     return AgentSpec(
+        # Opus 4.7 because generating unified diffs correctly — matching line
+        # numbers, exact context, and judging auto-apply vs. author-required
+        # severity — needs the stronger reasoning. Worth the spend.
         name="peermind-fix-agent",
-        model="claude-sonnet-4-5",
+        model="claude-opus-4-7",
         system=skill.system_prompt_template,
         tools=[{"type": "agent_toolset_20260401"}],
+        max_tokens=8192,
     )
 
 

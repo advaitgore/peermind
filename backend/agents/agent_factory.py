@@ -42,6 +42,21 @@ class AgentSpec:
     custom_tool_impls: dict[str, Callable[[dict[str, Any]], Awaitable[Any]]] = field(
         default_factory=dict
     )
+    # Execution path:
+    #   requires_managed_agents=True  → use client.beta.sessions (the Managed
+    #   Agents platform). Needed for roles that rely on the container toolset
+    #   (bash, read/write/edit, web_fetch) — e.g. the Code Runner.
+    #   requires_managed_agents=False → use Messages API with per-token
+    #   streaming. Better UX for roles that just emit structured text, because
+    #   Managed Agents only emits complete agent.message events per turn,
+    #   whereas Messages API streams content_block_deltas live.
+    # Every role still has a Managed Agent CREATED (see ensure_agent); this
+    # flag only changes which runtime we dispatch invocations through.
+    requires_managed_agents: bool = False
+    # Enable extended thinking on Messages API calls.
+    thinking_budget: int = 0
+    # Max tokens for Messages API.
+    max_tokens: int = 4096
 
 
 # Callback signature: (event_type, data) -> None
@@ -124,18 +139,37 @@ class AgentFactory:
         user_message: str,
         on_event: EventCallback | None = None,
     ) -> str:
-        """Run a single session end-to-end, streaming events, return final text.
+        """Run a single session end-to-end, streaming tokens to on_event.
 
-        Returns the concatenated text of all ``agent.message`` events. When the
-        caller expects JSON, parse it out of the returned string.
+        Dispatch strategy:
+        - Managed Agent is always CREATED (ensure_agent) so every role shows
+          up in client.beta.agents.list() and the architecture story holds.
+        - Execution goes through Messages API by default, because Managed
+          Agents' session stream only emits completed-turn ``agent.message``
+          events (i.e. the whole response arrives at once after ~2 min of
+          silence). Messages API streams content_block_deltas live and is
+          what the reviewer/fix-agent UX needs.
+        - Roles that need the Managed Agents container toolset (bash, file
+          ops, web_fetch) — i.e. the Code Runner — opt in via
+          ``spec.requires_managed_agents=True`` and go through the session
+          path, trading live token streaming for real tool execution.
         """
+        # Always register the Managed Agent so ``client.beta.agents.list()``
+        # reflects all six roles even when we dispatch via Messages API.
         try:
-            return await self._run_session_managed(spec, user_message, on_event)
+            await self.ensure_agent(spec)
         except Exception as e:
-            # Emit the error so the UI knows why we're falling back.
             if on_event:
-                await on_event("error", {"role": spec.name, "detail": f"{type(e).__name__}: {e}"})
-            return await self._run_session_messages_fallback(spec, user_message, on_event)
+                await on_event("error", {"role": spec.name, "detail": f"ensure_agent: {e}"})
+
+        if spec.requires_managed_agents:
+            try:
+                return await self._run_session_managed(spec, user_message, on_event)
+            except Exception as e:
+                if on_event:
+                    await on_event("error", {"role": spec.name, "detail": f"{type(e).__name__}: {e}"})
+                return await self._run_session_messages_fallback(spec, user_message, on_event)
+        return await self._run_session_messages_fallback(spec, user_message, on_event)
 
     async def _run_session_managed(
         self,
@@ -155,10 +189,12 @@ class AgentFactory:
 
         collected_text_parts: list[str] = []
 
-        # Open the stream, send the user message, and process events.
-        stream_ctx = self.client.beta.sessions.events.stream(session_id)
-
-        async def _process(stream: Any) -> None:
+        # AsyncAnthropic.beta.sessions.events.stream is a coroutine that
+        # returns an AsyncStream. AsyncStream is both an async context manager
+        # and an async iterator; we use the context-manager form so cleanup
+        # happens even if we break early on session.status_idle.
+        stream = await self.client.beta.sessions.events.stream(session_id)
+        async with stream as events:
             await self.client.beta.sessions.events.send(
                 session_id,
                 events=[
@@ -168,38 +204,35 @@ class AgentFactory:
                     }
                 ],
             )
-            async for event in stream:
-                etype = getattr(event, "type", None) or event.get("type")  # type: ignore[union-attr]
+            async for event in events:
+                etype = getattr(event, "type", None) or (
+                    event.get("type") if isinstance(event, dict) else None
+                )
                 if etype == "agent.message":
-                    content = getattr(event, "content", None) or event.get("content", [])  # type: ignore[union-attr]
+                    content = getattr(event, "content", None) or (
+                        event.get("content", []) if isinstance(event, dict) else []
+                    )
                     for block in content:
                         block_type = getattr(block, "type", None) or (
                             block.get("type") if isinstance(block, dict) else None
                         )
                         if block_type == "text":
-                            text = getattr(block, "text", None) or block.get("text", "")  # type: ignore[union-attr]
+                            text = getattr(block, "text", None) or (
+                                block.get("text", "") if isinstance(block, dict) else ""
+                            )
                             collected_text_parts.append(text)
                             if on_event:
                                 await on_event("token", {"text": text})
                 elif etype == "agent.tool_use":
-                    tool_name = getattr(event, "name", None) or event.get("name")  # type: ignore[union-attr]
+                    tool_name = getattr(event, "name", None) or (
+                        event.get("name") if isinstance(event, dict) else None
+                    )
                     if on_event:
                         await on_event("tool_use", {"tool": tool_name})
-                elif etype in (
-                    "agent.custom_tool_use",
-                    "agent.tool_use",
-                ) and self._is_custom_tool(event, spec):
-                    await self._handle_custom_tool(session_id, event, spec, on_event)
+                    if self._is_custom_tool(event, spec):
+                        await self._handle_custom_tool(session_id, event, spec, on_event)
                 elif etype == "session.status_idle":
                     break
-
-        # Support both async-context and sync-context depending on SDK impl.
-        try:
-            async with stream_ctx as stream:  # type: ignore[attr-defined]
-                await _process(stream)
-        except (TypeError, AttributeError):
-            with stream_ctx as stream:  # type: ignore[attr-defined]
-                await _process(stream)
 
         return "".join(collected_text_parts)
 
@@ -245,10 +278,12 @@ class AgentFactory:
         user_message: str,
         on_event: EventCallback | None,
     ) -> str:
-        """Fallback: use the Messages API directly when Managed Agents is unavailable.
+        """Messages API with per-token streaming + custom-tool tool-use loop.
 
-        We loop over tool_use / tool_result exchanges for any custom tools the
-        agent declares, and stream text deltas to on_event as tokens arrive.
+        This is the primary dispatch path (the old "fallback" name is retained
+        for diff clarity). Each ``stream.text_stream`` chunk fires ``on_event
+        ("token", ...)`` immediately so the UI can render it live. After a
+        ``tool_use`` turn we execute the custom tool server-side and loop.
         """
         tools_param = []
         for tool in spec.tools:
@@ -260,30 +295,93 @@ class AgentFactory:
                         "input_schema": tool.get("input_schema", {"type": "object"}),
                     }
                 )
-        # If no custom tools, still run a plain stream.
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
         collected: list[str] = []
+        # Prose-first streaming: the reviewer skills emit PART 1 prose,
+        # then a single-line sentinel ``===PEERMIND_JSON===``, then the
+        # JSON. Once we've seen the sentinel in the accumulated text we
+        # stop forwarding text chunks to on_event — the JSON is recovered
+        # later by ``extract_json`` but never shown as streaming text.
+        stream_sentinel = "===PEERMIND_JSON==="
+        past_sentinel = False
         while True:
-            async with self.client.messages.stream(
+            stream_kwargs: dict[str, Any] = dict(
                 model=spec.model,
-                max_tokens=4096,
+                max_tokens=spec.max_tokens,
                 system=spec.system,
                 messages=messages,
-                tools=tools_param or None,
-            ) as stream:
+            )
+            if tools_param:
+                stream_kwargs["tools"] = tools_param
+            if spec.thinking_budget > 0:
+                stream_kwargs["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": spec.thinking_budget,
+                }
+            async with self.client.messages.stream(**stream_kwargs) as stream:
                 async for text in stream.text_stream:
                     collected.append(text)
-                    if on_event:
-                        await on_event("token", {"text": text})
+                    if past_sentinel:
+                        # The JSON block — collect it for parsing but don't
+                        # leak it to the UI.
+                        continue
+                    combined = "".join(collected)
+                    idx = combined.find(stream_sentinel)
+                    if idx != -1:
+                        # Sentinel just landed. Forward only the portion of
+                        # the current chunk that precedes it, then flip the
+                        # flag so subsequent chunks are silent.
+                        already = sum(len(c) for c in collected[:-1])
+                        sentinel_in_chunk = idx - already
+                        visible = text[:sentinel_in_chunk] if sentinel_in_chunk > 0 else ""
+                        if on_event and visible:
+                            await on_event("token", {"text": visible})
+                        past_sentinel = True
+                    else:
+                        if on_event:
+                            await on_event("token", {"text": text})
                 final = await stream.get_final_message()
             tool_uses = [b for b in final.content if getattr(b, "type", None) == "tool_use"]
             if not tool_uses:
                 break
-            messages.append({"role": "assistant", "content": [b.model_dump() for b in final.content]})
+            # Re-serialize assistant content for the NEXT turn. model_dump()
+            # on a TextBlock includes a computed ``parsed_output`` field that
+            # the Messages API rejects on input ("Extra inputs are not
+            # permitted"). Whitelist only the input-legal fields per block.
+            clean_assistant: list[dict[str, Any]] = []
+            for b in final.content:
+                bt = getattr(b, "type", None)
+                if bt == "text":
+                    clean_assistant.append({"type": "text", "text": getattr(b, "text", "")})
+                elif bt == "tool_use":
+                    clean_assistant.append(
+                        {
+                            "type": "tool_use",
+                            "id": getattr(b, "id", None),
+                            "name": getattr(b, "name", None),
+                            "input": getattr(b, "input", {}),
+                        }
+                    )
+                elif bt == "thinking":
+                    clean_assistant.append(
+                        {
+                            "type": "thinking",
+                            "thinking": getattr(b, "thinking", ""),
+                            "signature": getattr(b, "signature", ""),
+                        }
+                    )
+                else:
+                    # Unknown block type — best-effort dump and strip parsed_output.
+                    d = b.model_dump()
+                    d.pop("parsed_output", None)
+                    clean_assistant.append(d)
+            messages.append({"role": "assistant", "content": clean_assistant})
             tool_results: list[dict[str, Any]] = []
             for tu in tool_uses:
                 name = tu.name  # type: ignore[attr-defined]
                 impl = spec.custom_tool_impls.get(name)
+                if on_event:
+                    await on_event("tool_use", {"tool": name})
                 if impl is None:
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": tu.id, "content": f"unknown_tool:{name}", "is_error": True}  # type: ignore[attr-defined]
@@ -310,30 +408,83 @@ factory = AgentFactory()
 
 # ----- JSON extraction helpers -----
 
-_JSON_RE = re.compile(r"\{[\s\S]*\}\s*$")
+_FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
+_JSON_AT_END_RE = re.compile(r"\{[\s\S]*\}\s*$")
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
     """Best-effort pull of a JSON object from the model's response.
 
-    Skills instruct the model to return JSON only, but we remain defensive.
+    Skills may instruct the model to emit prose + a sentinel + JSON, or prose
+    + fenced JSON, or plain JSON. Handle all paths.
     """
     text = text.strip()
-    # Strip code fences.
+
+    # Case 0 (preferred): prose + ``===PEERMIND_JSON===`` sentinel + JSON.
+    SENTINEL = "===PEERMIND_JSON==="
+    si = text.find(SENTINEL)
+    if si != -1:
+        tail = text[si + len(SENTINEL) :].strip()
+        # Drop a code fence if the model wrapped it anyway.
+        if tail.startswith("```"):
+            tail = re.sub(r"^```(?:json)?\s*", "", tail)
+            tail = re.sub(r"\s*```$", "", tail)
+        try:
+            return json.loads(tail)
+        except Exception:
+            # Try scanning within the tail for the first parseable object.
+            start = tail.find("{")
+            while start != -1:
+                depth = 0
+                for i, ch in enumerate(tail[start:], start):
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            candidate = tail[start : i + 1]
+                            try:
+                                return json.loads(candidate)
+                            except Exception:
+                                break
+                start = tail.find("{", start + 1)
+
+    # Case 1: fenced ```json ... ``` anywhere in the text. Pick the LAST
+    # fenced block — the reviewer may quote a JSON example inside prose and
+    # then emit the real structured output at the end.
+    fenced = list(_FENCED_JSON_RE.finditer(text))
+    if fenced:
+        for m in reversed(fenced):
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                continue
+
+    # Case 2: text IS just JSON (whole thing).
+    if text.startswith("{"):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+    # Case 3: text was fenced at outer level without json annotator.
     if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    m = _JSON_RE.search(text)
+        stripped = re.sub(r"^```(?:json)?\s*", "", text)
+        stripped = re.sub(r"\s*```$", "", stripped)
+        try:
+            return json.loads(stripped)
+        except Exception:
+            pass
+
+    # Case 4: JSON at end of text (prose before, {...} at the tail).
+    m = _JSON_AT_END_RE.search(text)
     if m:
         try:
             return json.loads(m.group(0))
         except Exception:
             pass
-    # Find the first {...} that parses.
+
+    # Case 5: scan for first {...} that balances and parses.
     start = text.find("{")
     while start != -1:
         depth = 0

@@ -14,8 +14,12 @@ def build_code_runner_spec() -> AgentSpec:
         name="peermind-code-runner",
         model="claude-sonnet-4-5",
         system=skill.system_prompt_template,
-        # bash/read/write all available via the default toolset.
+        # bash/read/write/edit all available via the default Managed Agents
+        # container toolset. The Code Runner is the one role that genuinely
+        # needs a real sandbox — we dispatch it through Managed Agents so it
+        # executes paper code in the cloud container instead of a local fake.
         tools=[{"type": "agent_toolset_20260401"}],
+        requires_managed_agents=True,
     )
 
 

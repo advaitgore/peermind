@@ -52,5 +52,14 @@
     "reviewer_guidelines_summary": "Evaluate as a preprint for community feedback. No formal accept/reject — produce detailed feedback for revision. Focus on correctness, reproducibility, and clarity of contribution.",
     "persona_skeptic_inject": "Flag any claims that cannot be verified from the paper alone. Identify what would need to happen before this should be submitted to a peer-reviewed venue. Note which claims are overstated.",
     "persona_champion_inject": "Identify what makes this preprint worth reading and what the community will find valuable immediately. Recommend specific venues where the work would fit after targeted revisions."
+  },
+  "custom": {
+    "full_name": "{journal_name}",
+    "criteria": ["soundness", "novelty", "significance", "clarity", "reproducibility"],
+    "score_range": [1, 10],
+    "strong_accept_threshold": 8,
+    "reviewer_guidelines_summary": "You are reviewing for {journal_name}, a peer-reviewed academic venue. Apply general best practices for rigorous scientific review: check the validity of empirical claims, the strength and novelty of the contribution, the completeness of the related work, the reproducibility of the methods, and the clarity of presentation. Where the venue's exact rubric is unknown, default to the standards of a competitive venue in the paper's apparent field.",
+    "persona_skeptic_inject": "Without a specific rubric from {journal_name}, apply the most rigorous common standards: demand clear experimental protocols, adequate baselines, statistical significance, limitations section, and concrete reproducibility detail (seeds, compute, hyperparameters).",
+    "persona_champion_inject": "Without a specific rubric from {journal_name}, champion the paper's contribution on its own terms: identify the strongest empirical and conceptual findings, surface implications the authors may have undersold, and recommend targeted revisions over rejection when the core idea is sound."
   }
 }

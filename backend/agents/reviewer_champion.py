@@ -24,6 +24,7 @@ def build_champion_spec(journal: dict[str, Any]) -> AgentSpec:
         model="claude-opus-4-7",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
+        max_tokens=6144,
     )
 
 

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     semantic_scholar_api_key: str = Field("", alias="SEMANTIC_SCHOLAR_API_KEY")
 
     latex_compile_timeout: int = Field(60, alias="LATEX_COMPILE_TIMEOUT")
-    max_review_rounds: int = Field(3, alias="MAX_REVIEW_ROUNDS")
+    max_review_rounds: int = Field(2, alias="MAX_REVIEW_ROUNDS")
     critique_delta_threshold: float = Field(0.15, alias="CRITIQUE_DELTA_THRESHOLD")
 
     job_storage_path: str = Field("/tmp/peermind_jobs", alias="JOB_STORAGE_PATH")

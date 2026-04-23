@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { Check, X, Wand2 } from "lucide-react";
 import type { AutoApplyPatch } from "@/lib/types";
 import { applyPatch, applyAllPatches, rejectPatch } from "@/lib/api";
 import { useJob } from "@/lib/store";
@@ -12,6 +13,8 @@ export function PatchQueue({
   setMode,
   focusedPatchId,
   setFocused,
+  onAutoApplyAll,
+  autoApplyActive,
 }: {
   jobId: string;
   patches: AutoApplyPatch[];
@@ -19,6 +22,8 @@ export function PatchQueue({
   setMode: (m: "idle" | "one_by_one") => void;
   focusedPatchId: string | null;
   setFocused: (id: string | null) => void;
+  onAutoApplyAll?: () => void;
+  autoApplyActive?: boolean;
 }) {
   const pending = patches.filter((p) => p.status === "pending");
   const applied = patches.filter((p) => p.status === "applied").length;
@@ -59,9 +64,9 @@ export function PatchQueue({
   if (patches.length === 0) return null;
 
   return (
-    <div className="border-t border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]">
-      <div className="flex items-center gap-3 px-3 py-2 text-[12px]">
-        <span className="badge">
+    <div className="border-t border-[color:var(--color-border)] bg-[color:var(--color-surface)]">
+      <div className="flex items-center gap-3 px-[var(--space-4)] py-[var(--space-3)] text-[var(--text-sm)]">
+        <span className="eyebrow">
           {pending.length} pending · {applied} applied · {rejected} rejected
         </span>
         <div className="flex-1" />
@@ -78,36 +83,45 @@ export function PatchQueue({
               Review one by one
             </button>
             <button
-              className="btn btn-primary"
-              disabled={pending.length === 0}
-              onClick={async () => {
-                pending.forEach((p) => optimistApply(p.patch_id));
-                await applyAllPatches(jobId);
+              className="btn btn-primary inline-flex items-center gap-2"
+              disabled={pending.length === 0 || autoApplyActive}
+              onClick={() => {
+                if (onAutoApplyAll) onAutoApplyAll();
+                else {
+                  pending.forEach((p) => optimistApply(p.patch_id));
+                  void applyAllPatches(jobId);
+                }
               }}
             >
-              Auto-apply all
+              <Wand2 size={14} />
+              {autoApplyActive ? "Applying…" : "Auto-apply all"}
             </button>
           </>
         ) : (
           focused && (
             <>
-              <span className="font-mono text-[11px] text-[color:var(--color-text-dim)]">
-                {focused.category}
+              <span className="chip">{focused.category}</span>
+              <span
+                className="text-[var(--text-sm)] truncate"
+                style={{ maxWidth: "40ch", color: "var(--color-text-muted)" }}
+              >
+                {focused.description}
               </span>
-              <span className="text-[12px] truncate max-w-[40ch]">{focused.description}</span>
               <button
-                className="btn"
+                className="btn inline-flex items-center gap-1.5"
                 onClick={() => handleReject(focused.patch_id)}
                 title="Reject (R)"
               >
-                Reject <kbd className="ml-1 text-[10px]">R</kbd>
+                <X size={13} />
+                Reject <kbd className="ml-1 text-[10px] opacity-70">R</kbd>
               </button>
               <button
-                className="btn btn-primary"
+                className="btn btn-primary inline-flex items-center gap-1.5"
                 onClick={() => handleApply(focused.patch_id)}
                 title="Apply (A)"
               >
-                Apply <kbd className="ml-1 text-[10px]">A</kbd>
+                <Check size={13} />
+                Apply <kbd className="ml-1 text-[10px] opacity-70">A</kbd>
               </button>
             </>
           )

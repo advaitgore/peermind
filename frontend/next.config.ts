@@ -4,6 +4,11 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // Move Next.js dev overlay out of the reviewer panel corner. Users can
+  // still toggle it via the N button; it just lives out of the way now.
+  devIndicators: {
+    position: "bottom-right",
+  },
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${API_BASE}/api/:path*` },

@@ -27,6 +27,13 @@ EventType = Literal[
     "patch_ready",
     "patch_applied",
     "patch_rejected",
+    # Fine-grained apply sub-steps — drives the AutoApplyToast sub-timeline
+    # (locating → diffing → compiling → reloading) so the user can see what
+    # the Fix Agent is doing instead of staring at a single spinner.
+    "patch_locating",
+    "patch_diffing",
+    "patch_compiling",
+    "patch_reloading",
     "compile_started",
     "compile_success",
     "compile_error",
@@ -36,7 +43,7 @@ EventType = Literal[
 
 AgentId = Literal["orchestrator", "skeptic", "champion", "scout", "code_runner", "fix_agent", "system"]
 
-JournalId = Literal["neurips", "icml", "iclr", "nature", "science", "arxiv"]
+JournalId = Literal["neurips", "icml", "iclr", "nature", "science", "arxiv", "custom"]
 
 
 def _now_iso() -> str:
@@ -68,15 +75,27 @@ class JournalProfile(BaseModel):
     persona_champion_inject: str
 
 
+class DetectedVenue(BaseModel):
+    journal_id: JournalId
+    display_name: str
+    rationale: str = ""
+    confidence: float = 0.5
+
+
 class JobCreateResponse(BaseModel):
     job_id: str
     title: str
     source_type: Literal["tex", "zip", "pdf", "arxiv"]
     has_source: bool
+    detected_venue: DetectedVenue | None = None
 
 
 class StartJobRequest(BaseModel):
     journal: JournalId
+    # When journal == "custom", the display name the user typed. Gets
+    # substituted into the custom profile's {journal_name} placeholders so
+    # reviewers speak about the correct venue.
+    custom_venue_name: str | None = None
 
 
 class StartJobResponse(BaseModel):
@@ -126,6 +145,15 @@ class AutoApplyPatch(BaseModel):
     status: Literal["pending", "applied", "rejected", "requires_manual_review"] = "pending"
 
 
+class FixHint(BaseModel):
+    """Optional inline patch attached to an AuthorAction. If present, the
+    frontend can offer a 'Fix now' button that applies this diff scoped to
+    just this item (bypassing the regular auto-apply queue)."""
+    category: Literal["citation", "typo", "notation", "caption", "phrasing"] = "phrasing"
+    diff: str
+    description: str = ""
+
+
 class AuthorAction(BaseModel):
     id: str
     title: str
@@ -134,6 +162,12 @@ class AuthorAction(BaseModel):
     evidence: str = ""
     suggested_action: str = ""
     estimated_effort: Literal["hours", "days", "weeks"] = "days"
+    # Location hints — Fix Agent estimates roughly where in the paper/source
+    # this item lives. Click-to-zoom uses these.
+    page_hint: int | None = None
+    tex_line_hint: int | None = None
+    # If Fix Agent can produce a concrete edit, offer it.
+    fix_hint: FixHint | None = None
 
 
 class Verdict(BaseModel):

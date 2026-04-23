@@ -28,6 +28,10 @@ build/
 /tmp/peermind_jobs/
 backend/peermind.db
 backend/peermind.db-journal
+peermind.db
+peermind.db-journal
+*.db
+*.db-journal
 *.sqlite
 *.sqlite3
 
@@ -39,3 +43,4 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+.claude/

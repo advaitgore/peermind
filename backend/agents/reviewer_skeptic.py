@@ -24,6 +24,9 @@ def build_skeptic_spec(journal: dict[str, Any]) -> AgentSpec:
         model="claude-opus-4-7",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
+        # Prose comments + structured JSON both fit in this budget. The prose
+        # part streams first (visible UX); the JSON lands at the end.
+        max_tokens=6144,
     )
 
 

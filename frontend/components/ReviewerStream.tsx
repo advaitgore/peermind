@@ -1,8 +1,25 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useJob } from "@/lib/store";
+import { useTypewriter } from "@/lib/useTypewriter";
+import type {
+  CodeRunResult,
+  LiteratureFinding,
+  ReviewerOutput,
+} from "@/lib/types";
+
+interface RoundData {
+  skepticText: string;
+  championText: string;
+  skepticReview?: ReviewerOutput;
+  championReview?: ReviewerOutput;
+  deltaFromPrev?: number;
+  literature?: LiteratureFinding[];
+  code?: CodeRunResult[];
+  converged?: boolean;
+}
 
 function scoresLine(scores: Record<string, number> | undefined) {
   if (!scores) return null;
@@ -12,7 +29,7 @@ function scoresLine(scores: Record<string, number> | undefined) {
     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-[11px]">
       {entries.map(([k, v]) => (
         <div key={k} className="flex justify-between">
-          <span className="text-[color:var(--color-text-dim)]">{k}</span>
+          <span style={{ color: "var(--color-text-muted)" }}>{k}</span>
           <span>{typeof v === "number" ? v.toFixed(1) : String(v)}</span>
         </div>
       ))}
@@ -20,17 +37,213 @@ function scoresLine(scores: Record<string, number> | undefined) {
   );
 }
 
-function cleanStreamText(text: string): string {
-  // The reviewer emits JSON-only per its skill contract. To avoid showing raw
-  // JSON to the user we fall back to stripping {} and "" around the content so
-  // they see prose-ish output.
-  if (!text) return "";
-  const trimmed = text.trim();
-  if (trimmed.startsWith("{") || trimmed.startsWith("```")) {
-    // The model is mid-JSON; show a loading dashes while it writes.
-    return "…analyzing";
-  }
-  return text;
+function ReviewerColumn({
+  label,
+  variant,
+  streamText,
+  review,
+}: {
+  label: string;
+  variant: "skeptic" | "champion";
+  streamText: string;
+  review: ReviewerOutput | undefined;
+}) {
+  const typed = useTypewriter(streamText);
+  const typingDone = review != null;
+
+  return (
+    <div className="mb-[var(--space-4)]">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className={`badge-${variant}`}>{label}</span>
+        {review ? (
+          <span
+            className="font-mono text-[11px]"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            {review.recommendation?.replace(/_/g, " ")}
+          </span>
+        ) : streamText ? (
+          <span
+            className="eyebrow inline-flex items-center gap-1"
+            style={{ color: "var(--color-primary-strong)" }}
+          >
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[color:var(--color-primary)] animate-pulse" />
+            live
+          </span>
+        ) : (
+          <span className="eyebrow">waiting</span>
+        )}
+      </div>
+
+      <AnimatePresence mode="wait" initial={false}>
+        {typingDone ? (
+          <motion.div
+            key="summary"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.25 }}
+            className="text-[var(--text-sm)] leading-relaxed whitespace-pre-wrap"
+          >
+            {review!.summary}
+          </motion.div>
+        ) : streamText ? (
+          <motion.pre
+            key="stream"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.15 }}
+            className="font-mono text-[11.5px] leading-[1.55] whitespace-pre-wrap break-words"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            {typed}
+            <span className="stream-cursor" />
+          </motion.pre>
+        ) : (
+          <motion.div
+            key="idle"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="text-[var(--text-sm)] italic"
+            style={{ color: "var(--color-text-faint)" }}
+          >
+            queued
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {review && (
+        <>
+          {variant === "skeptic" && review.weaknesses?.length ? (
+            <ul className="mt-2 space-y-1 text-[12px]">
+              {review.weaknesses.slice(0, 4).map((w, i) => (
+                <li key={i} className="flex gap-2">
+                  <span
+                    className="mt-1.5 shrink-0 w-1 h-1 rounded-full"
+                    style={{
+                      background:
+                        w.severity === "critical"
+                          ? "var(--color-skeptic)"
+                          : w.severity === "major"
+                          ? "var(--color-warning)"
+                          : "var(--color-text-faint)",
+                    }}
+                  />
+                  <span>{w.issue}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {variant === "champion" && review.strengths?.length ? (
+            <ul className="mt-2 space-y-1 text-[12px]">
+              {review.strengths.slice(0, 3).map((s, i) => (
+                <li key={i} style={{ color: "var(--color-text-muted)" }}>
+                  + {s}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {scoresLine(review.scores)}
+        </>
+      )}
+    </div>
+  );
+}
+
+function RoundBlock({
+  r,
+  rd,
+  isLatest,
+}: {
+  r: number;
+  rd: RoundData;
+  isLatest: boolean;
+}) {
+  const deltaPct =
+    rd.deltaFromPrev === undefined
+      ? null
+      : Math.round((1 - Math.min(Math.max(rd.deltaFromPrev, 0), 1)) * 100);
+
+  return (
+    <div className={isLatest ? "" : "opacity-60"}>
+      <div className="flex items-center gap-2 mb-[var(--space-3)]">
+        <span className="eyebrow">Round {r}</span>
+        {isLatest && (
+          <span
+            className="eyebrow"
+            style={{ color: "var(--color-primary-strong)" }}
+          >
+            · live
+          </span>
+        )}
+        {deltaPct !== null && !isLatest && (
+          <span
+            className="eyebrow"
+            style={{ color: "var(--color-text-faint)" }}
+          >
+            · {deltaPct}% overlap
+          </span>
+        )}
+        {rd.converged && (
+          <span
+            className="eyebrow"
+            style={{ color: "var(--color-champion)" }}
+          >
+            · converged
+          </span>
+        )}
+        <div className="flex-1 tick-divider" />
+      </div>
+
+      <ReviewerColumn
+        label="REVIEWER 1"
+        variant="skeptic"
+        streamText={rd.skepticText}
+        review={rd.skepticReview}
+      />
+      <ReviewerColumn
+        label="REVIEWER 2"
+        variant="champion"
+        streamText={rd.championText}
+        review={rd.championReview}
+      />
+
+      {rd.literature && rd.literature.length > 0 && (
+        <div className="mt-2 card-tight px-3 py-2 text-[var(--text-sm)]">
+          <div className="eyebrow mb-1">
+            Literature · {rd.literature.length} finding
+            {rd.literature.length === 1 ? "" : "s"}
+          </div>
+          <ul className="space-y-1">
+            {rd.literature.slice(0, 3).map((f, i) => (
+              <li key={i} className="text-[12px] leading-snug">
+                <span className="eyebrow mr-1">
+                  {f.category.replace(/_/g, " ")}
+                </span>
+                {f.papers?.[0]?.title || f.claim}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {rd.code && rd.code.length > 0 && (
+        <div className="mt-2 card-tight px-3 py-2 text-[var(--text-sm)]">
+          <div className="eyebrow mb-1">
+            Code · {rd.code.filter((c) => c.status === "passed").length}/
+            {rd.code.length} passed
+          </div>
+          <ul className="space-y-1">
+            {rd.code.slice(0, 3).map((c, i) => (
+              <li key={i} className="font-mono text-[11px]">
+                block {c.block_id} · {c.language} · {c.status}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function ReviewerStream() {
@@ -39,10 +252,18 @@ export function ReviewerStream() {
   const literatureAll = useJob((s) => s.literatureAll);
   const codeAll = useJob((s) => s.codeAll);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followRef = useRef(true);
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    followRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+  };
 
   useEffect(() => {
-    if (!scrollRef.current) return;
-    scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    const el = scrollRef.current;
+    if (!el) return;
+    if (followRef.current) el.scrollTop = el.scrollHeight;
   }, [rounds, currentRound, literatureAll.length, codeAll.length]);
 
   const roundNums = Object.keys(rounds)
@@ -50,142 +271,25 @@ export function ReviewerStream() {
     .sort((a, b) => a - b);
 
   return (
-    <div ref={scrollRef} className="h-full overflow-y-auto scroll-pane px-3 py-3">
-      {roundNums.map((r) => {
-        const rd = rounds[r];
-        return (
-          <div key={r} className="mb-5">
-            <div className="text-[11px] font-mono uppercase tracking-widest text-[color:var(--color-text-faint)] mb-2">
-              — Round {r} —
-            </div>
-
-            {/* Skeptic */}
-            <div className="mb-4">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="badge badge-skeptic">SKEPTIC</span>
-                {rd.skepticReview && (
-                  <span className="text-[11px] font-mono text-[color:var(--color-text-dim)]">
-                    {rd.skepticReview.recommendation}
-                  </span>
-                )}
-              </div>
-              <div className="text-[13px] leading-relaxed whitespace-pre-wrap text-[color:var(--color-text)]">
-                {rd.skepticReview?.summary || cleanStreamText(rd.skepticText)}
-                {!rd.skepticReview && rd.skepticText && <span className="stream-cursor" />}
-              </div>
-              {rd.skepticReview && (
-                <>
-                  {rd.skepticReview.weaknesses?.length ? (
-                    <ul className="mt-2 space-y-1 text-[12px]">
-                      {rd.skepticReview.weaknesses.slice(0, 5).map((w, i) => (
-                        <li key={i} className="flex gap-2">
-                          <span
-                            className={`badge text-[10px] ${
-                              w.severity === "critical"
-                                ? "badge-skeptic"
-                                : w.severity === "major"
-                                ? "bg-[color:var(--color-surface-2)]"
-                                : ""
-                            }`}
-                          >
-                            {w.severity}
-                          </span>
-                          <span>{w.issue}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {scoresLine(rd.skepticReview.scores)}
-                </>
-              )}
-            </div>
-
-            {/* Champion */}
-            <div className="mb-2">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="badge badge-champion">CHAMPION</span>
-                {rd.championReview && (
-                  <span className="text-[11px] font-mono text-[color:var(--color-text-dim)]">
-                    {rd.championReview.recommendation}
-                  </span>
-                )}
-              </div>
-              <div className="text-[13px] leading-relaxed whitespace-pre-wrap">
-                {rd.championReview?.summary || cleanStreamText(rd.championText)}
-                {!rd.championReview && rd.championText && <span className="stream-cursor" />}
-              </div>
-              {rd.championReview && (
-                <>
-                  {rd.championReview.strengths?.length ? (
-                    <ul className="mt-2 space-y-1 text-[12px]">
-                      {rd.championReview.strengths.slice(0, 4).map((s, i) => (
-                        <li key={i}>+ {s}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {scoresLine(rd.championReview.scores)}
-                </>
-              )}
-            </div>
-
-            {/* Literature banner */}
-            <AnimatePresence>
-              {rd.literature && rd.literature.length > 0 && (
-                <motion.div
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="card-tight mt-2 px-3 py-2 text-[12px]"
-                >
-                  <div className="font-mono text-[11px] uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">
-                    📚 Literature found — context updated for next round
-                  </div>
-                  <ul className="space-y-1">
-                    {rd.literature.slice(0, 4).map((f, i) => (
-                      <li key={i} className="text-[12px]">
-                        <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--color-text-dim)] mr-1">
-                          {f.category.replace(/_/g, " ")}:
-                        </span>
-                        {f.papers?.[0]?.title || f.claim}
-                      </li>
-                    ))}
-                  </ul>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Code runs banner */}
-            <AnimatePresence>
-              {rd.code && rd.code.length > 0 && (
-                <motion.div
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="card-tight mt-2 px-3 py-2 text-[12px]"
-                >
-                  <div className="font-mono text-[11px] uppercase tracking-wider text-[color:var(--color-text-dim)] mb-1">
-                    ⚙ Code executed — {rd.code.filter((c) => c.status === "passed").length}/{rd.code.length} passed
-                  </div>
-                  <ul className="space-y-1">
-                    {rd.code.slice(0, 3).map((c, i) => (
-                      <li key={i} className="font-mono text-[11px]">
-                        block {c.block_id} · {c.language} · {c.status}
-                      </li>
-                    ))}
-                  </ul>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {rd.converged && (
-              <div className="mt-2 text-[11px] font-mono uppercase tracking-wider text-[color:var(--color-primary)]">
-                ✓ Reviews converged
-              </div>
-            )}
-          </div>
-        );
-      })}
+    <div
+      ref={scrollRef}
+      onScroll={onScroll}
+      className="h-full overflow-y-auto scroll-pane px-[var(--space-4)] py-[var(--space-3)]"
+    >
+      {roundNums.map((r, i) => (
+        <div key={r} className={i > 0 ? "mt-[var(--space-5)]" : ""}>
+          <RoundBlock r={r} rd={rounds[r]} isLatest={i === roundNums.length - 1} />
+        </div>
+      ))}
       {!roundNums.length && (
-        <div className="h-full flex items-center justify-center text-[12px] text-[color:var(--color-text-faint)] font-mono">
-          waiting for agents to start…
+        <div
+          className="h-full flex items-center justify-center text-center font-mono py-[var(--space-6)]"
+          style={{ color: "var(--color-text-faint)" }}
+        >
+          <div>
+            <div className="inline-block w-1.5 h-1.5 rounded-full bg-[color:var(--color-primary)] animate-pulse mb-2" />
+            <div className="text-[var(--text-sm)]">booting reviewers…</div>
+          </div>
         </div>
       )}
     </div>

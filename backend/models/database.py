@@ -34,6 +34,13 @@ class Job(Base):
     paper_text: Mapped[str | None] = mapped_column(Text, default=None)
     paper_title: Mapped[str | None] = mapped_column(String(512), default=None)
 
+    # Auto-detected venue suggestion (Haiku 4.5 classifier at upload time).
+    # Used to pre-fill the landing page's venue selector. User can override.
+    detected_journal_id: Mapped[str | None] = mapped_column(String(32), default=None)
+    detected_display_name: Mapped[str | None] = mapped_column(String(120), default=None)
+    detected_rationale: Mapped[str | None] = mapped_column(String(600), default=None)
+    detected_confidence: Mapped[float | None] = mapped_column(default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -57,6 +64,20 @@ class Patch(Base):
     )
 
     job: Mapped[Job] = relationship(back_populates="patches")
+
+
+class ChatMessage(Base):
+    """One message in the per-job chat thread. Persisted so the conversation
+    survives reloads."""
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
 
 
 _engine = None

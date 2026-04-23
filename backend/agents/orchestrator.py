@@ -41,13 +41,45 @@ from .skills import load_skill
 # ---------- Utility: load journal profile ----------
 
 
-def _load_journal(journal_id: str) -> dict[str, Any]:
+def _claim_covered(claim: str, seeds: list[str]) -> bool:
+    """Cheap overlap check — is this new claim basically the same thing a seed
+    claim was already about? Uses token Jaccard on words ≥4 chars.
+    """
+    import re as _re
+    tokens = lambda s: {t for t in _re.findall(r"[A-Za-z0-9]+", s.lower()) if len(t) > 3}
+    ct = tokens(claim)
+    if not ct:
+        return True
+    for s in seeds:
+        st = tokens(s)
+        if not st:
+            continue
+        overlap = len(ct & st) / max(len(ct | st), 1)
+        if overlap >= 0.35:
+            return True
+    return False
+
+
+def _load_journal(journal_id: str, custom_venue_name: str | None = None) -> dict[str, Any]:
     path = Path(__file__).resolve().parent.parent / "journal_profiles" / "profiles.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     if journal_id not in data:
         raise KeyError(f"Unknown journal profile: {journal_id}")
     profile = dict(data[journal_id])
     profile["id"] = journal_id
+
+    # Substitute {journal_name} in the custom profile so reviewers speak
+    # about the right venue instead of literally echoing the placeholder.
+    if journal_id == "custom":
+        name = (custom_venue_name or "the target venue").strip() or "the target venue"
+        for key in (
+            "full_name",
+            "reviewer_guidelines_summary",
+            "persona_skeptic_inject",
+            "persona_champion_inject",
+        ):
+            if key in profile and isinstance(profile[key], str):
+                profile[key] = profile[key].replace("{journal_name}", name)
     return profile
 
 
@@ -55,8 +87,17 @@ def _load_journal(journal_id: str) -> dict[str, Any]:
 
 
 async def _initial_compile(job: Job) -> None:
-    if not job.main_tex:
-        return
+    """Show the paper PDF as quickly as possible.
+
+    For arXiv sources, ``create_job`` already saved the canonical pre-built
+    PDF from ``arxiv.org/pdf/{id}`` to ``job.pdf_path`` — compile-from-source
+    is fragile (minted, custom .sty, etc.) and can take 30+ seconds when it
+    works at all. Short-circuit to the pre-built PDF and tell the UI.
+
+    For uploaded ``.tex``/``.zip`` sources we don't have a pre-built PDF so
+    we fall through to ``compile_latex`` (latexmk in the Docker sandbox).
+    Patches always recompile — that path exercises the sandbox for real.
+    """
     src = Path(job.source_dir)
     await bus.publish(
         job.id,
@@ -66,6 +107,35 @@ async def _initial_compile(job: Job) -> None:
             data={"stage": "initial"},
         ),
     )
+
+    # Fast path: arXiv pre-built PDF is already on disk.
+    if job.pdf_path and Path(job.pdf_path).is_file():
+        await bus.publish(
+            job.id,
+            ReviewEvent(
+                event_type="compile_success",
+                agent="system",
+                data={
+                    "pdf_url": f"/api/jobs/{job.id}/output.pdf?v=prebuilt",
+                    "elapsed_ms": 0,
+                    "stage": "initial",
+                    "source": "prebuilt",
+                },
+            ),
+        )
+        return
+
+    if not job.main_tex:
+        await bus.publish(
+            job.id,
+            ReviewEvent(
+                event_type="compile_error",
+                agent="system",
+                data={"log": "No .tex source found to compile", "stage": "initial"},
+            ),
+        )
+        return
+
     res = await compile_latex(src, main_tex=job.main_tex)
     if res.success and res.pdf_path is not None:
         sm = get_sessionmaker()
@@ -83,6 +153,7 @@ async def _initial_compile(job: Job) -> None:
                     "pdf_url": f"/api/jobs/{job.id}/output.pdf?v=initial",
                     "elapsed_ms": res.elapsed_ms,
                     "stage": "initial",
+                    "source": "compiled",
                 },
             ),
         )
@@ -92,7 +163,7 @@ async def _initial_compile(job: Job) -> None:
             ReviewEvent(
                 event_type="compile_error",
                 agent="system",
-                data={"log": res.log[-4000:], "stage": "initial"},
+                data={"log": (res.log or "")[-4000:] or "compile failed", "stage": "initial"},
             ),
         )
 
@@ -328,7 +399,11 @@ async def _run_fix_agent(
 # ---------- Public entrypoint ----------
 
 
-async def run_review_pipeline(job_id: str, journal_id: str) -> None:
+async def run_review_pipeline(
+    job_id: str,
+    journal_id: str,
+    custom_venue_name: str | None = None,
+) -> None:
     """Top-level pipeline. Publishes SSE events throughout and terminates with job_complete."""
     sm = get_sessionmaker()
     async with sm() as session:
@@ -337,7 +412,7 @@ async def run_review_pipeline(job_id: str, journal_id: str) -> None:
         return
 
     try:
-        journal = _load_journal(journal_id)
+        journal = _load_journal(journal_id, custom_venue_name)
 
         await bus.publish(
             job_id,
@@ -368,110 +443,92 @@ async def run_review_pipeline(job_id: str, journal_id: str) -> None:
         all_round_reviews: list[dict[str, Any]] = []
         lit_findings: list[dict[str, Any]] = []
         code_results: list[dict[str, Any]] = []
-        settings = get_settings()
 
-        prev_claims: list[str] = []
-        for round_num in range(1, settings.max_review_rounds + 1):
-            await bus.publish(
-                job_id,
-                ReviewEvent(
-                    event_type="round_started",
-                    agent="orchestrator",
-                    round=round_num,
-                    data={"of": settings.max_review_rounds},
-                ),
+        # ----- Single-round parallel pipeline -----
+        # Rounds-with-convergence proved redundant: rounds 2/3 rarely surfaced
+        # new information because reviewers read the same source twice. We now
+        # run reviewers + scout + code runner all in parallel, then optionally
+        # do a tiny scout "refine" pass if reviewers ask for specific claims
+        # the seed search didn't cover.
+
+        await bus.publish(
+            job_id,
+            ReviewEvent(
+                event_type="round_started",
+                agent="orchestrator",
+                round=1,
+                data={"of": 1, "mode": "parallel"},
+            ),
+        )
+
+        # Seed claims for the scout — so it can begin searching immediately
+        # based on what the paper itself claims, not wait for reviewer output.
+        from ..utils.extract import extract_seed_claims
+
+        seed_claims = extract_seed_claims(paper_text, limit=4)
+
+        skeptic_task = asyncio.create_task(
+            _run_reviewer(
+                job_id, "skeptic", build_skeptic_spec, build_skeptic_user_message,
+                journal, 1, paper_text, [], [], [],
             )
-
-            # Run skeptic and champion in parallel.
-            skeptic_task = asyncio.create_task(
-                _run_reviewer(
-                    job_id,
-                    "skeptic",
-                    build_skeptic_spec,
-                    build_skeptic_user_message,
-                    journal,
-                    round_num,
-                    paper_text,
-                    all_round_reviews,
-                    lit_findings,
-                    code_results,
-                )
+        )
+        champion_task = asyncio.create_task(
+            _run_reviewer(
+                job_id, "champion", build_champion_spec, build_champion_user_message,
+                journal, 1, paper_text, [], [], [],
             )
-            champion_task = asyncio.create_task(
-                _run_reviewer(
-                    job_id,
-                    "champion",
-                    build_champion_spec,
-                    build_champion_user_message,
-                    journal,
-                    round_num,
-                    paper_text,
-                    all_round_reviews,
-                    lit_findings,
-                    code_results,
-                )
+        )
+        scout_task = asyncio.create_task(
+            _run_scout(
+                job_id, 1, seed_claims,
+                job.paper_title or job.title, paper_text[:4000],
             )
-            skeptic_out, champion_out = await asyncio.gather(skeptic_task, champion_task)
+        )
+        code_task = asyncio.create_task(_run_code(job_id, 1, code_blocks_all))
 
-            all_round_reviews.append(
-                {"round": round_num, "a": skeptic_out, "b": champion_out}
+        skeptic_out, champion_out, seed_findings, code_out = await asyncio.gather(
+            skeptic_task, champion_task, scout_task, code_task
+        )
+        all_round_reviews.append({"round": 1, "a": skeptic_out, "b": champion_out})
+        lit_findings.extend(seed_findings)
+        code_results.extend(code_out)
+
+        # Emit a critique_delta of 1.0 (everything new — this is the only round)
+        # so the UI's Δ chip has a value. Not semantically meaningful in a
+        # single-round pipeline but keeps the store / widgets happy.
+        await bus.publish(
+            job_id,
+            ReviewEvent(
+                event_type="critique_delta",
+                agent="orchestrator",
+                round=1,
+                data={"delta": 1.0, "threshold": 0.15, "mode": "single-round"},
+            ),
+        )
+
+        # Optional scout refine: only if reviewers produced claims that weren't
+        # covered by our heuristic seed.
+        reviewer_claims = (skeptic_out.get("key_claims_to_verify") or []) + (
+            champion_out.get("key_claims_to_verify") or []
+        )
+        new_claims = [c for c in reviewer_claims if not _claim_covered(c, seed_claims)]
+        if new_claims:
+            extra = await _run_scout(
+                job_id, 1, new_claims[:3],
+                job.paper_title or job.title, paper_text[:4000],
             )
+            lit_findings.extend(extra)
 
-            # Critique delta: compare this round's combined claims against previous.
-            current_claims = (skeptic_out.get("key_claims_to_verify") or []) + (
-                champion_out.get("key_claims_to_verify") or []
-            )
-            delta = compute_critique_delta(prev_claims, current_claims) if prev_claims else 1.0
-            await bus.publish(
-                job_id,
-                ReviewEvent(
-                    event_type="critique_delta",
-                    agent="orchestrator",
-                    round=round_num,
-                    data={"delta": delta, "threshold": settings.critique_delta_threshold},
-                ),
-            )
-
-            # If round >= 2 and we've converged, break.
-            if round_num >= 2 and delta < settings.critique_delta_threshold:
-                await bus.publish(
-                    job_id,
-                    ReviewEvent(
-                        event_type="round_complete",
-                        agent="orchestrator",
-                        round=round_num,
-                        data={"converged": True, "delta": delta},
-                    ),
-                )
-                break
-
-            prev_claims = current_claims
-
-            # Unless this was the last round, run scout + code_runner to enrich next round.
-            if round_num < settings.max_review_rounds:
-                scout_task = asyncio.create_task(
-                    _run_scout(
-                        job_id,
-                        round_num,
-                        current_claims[:15],
-                        job.paper_title or job.title,
-                        paper_text[:4000],
-                    )
-                )
-                code_task = asyncio.create_task(_run_code(job_id, round_num, code_blocks_all))
-                new_lit, new_code = await asyncio.gather(scout_task, code_task)
-                lit_findings.extend(new_lit)
-                code_results.extend(new_code)
-
-            await bus.publish(
-                job_id,
-                ReviewEvent(
-                    event_type="round_complete",
-                    agent="orchestrator",
-                    round=round_num,
-                    data={"converged": False, "delta": delta},
-                ),
-            )
+        await bus.publish(
+            job_id,
+            ReviewEvent(
+                event_type="round_complete",
+                agent="orchestrator",
+                round=1,
+                data={"converged": True, "delta": 1.0, "mode": "single-round"},
+            ),
+        )
 
         # Ensure initial compile finished before the author starts applying patches.
         try:

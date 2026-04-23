@@ -16,6 +16,10 @@ export type EventType =
   | "patch_ready"
   | "patch_applied"
   | "patch_rejected"
+  | "patch_locating"
+  | "patch_diffing"
+  | "patch_compiling"
+  | "patch_reloading"
   | "compile_started"
   | "compile_success"
   | "compile_error"
@@ -31,7 +35,7 @@ export type AgentId =
   | "fix_agent"
   | "system";
 
-export type JournalId = "neurips" | "icml" | "iclr" | "nature" | "science" | "arxiv";
+export type JournalId = "neurips" | "icml" | "iclr" | "nature" | "science" | "arxiv" | "custom";
 
 export interface ReviewEvent<T = Record<string, unknown>> {
   seq: number;
@@ -40,6 +44,13 @@ export interface ReviewEvent<T = Record<string, unknown>> {
   round: number;
   data: T;
   timestamp: string;
+}
+
+export interface DetectedVenue {
+  journal_id: JournalId;
+  display_name: string;
+  rationale: string;
+  confidence: number;
 }
 
 export interface JournalProfile {
@@ -102,6 +113,12 @@ export interface AutoApplyPatch {
   status?: "pending" | "applied" | "rejected" | "requires_manual_review";
 }
 
+export interface FixHint {
+  category: "citation" | "typo" | "notation" | "caption" | "phrasing";
+  diff: string;
+  description?: string;
+}
+
 export interface AuthorAction {
   id: string;
   title: string;
@@ -110,6 +127,10 @@ export interface AuthorAction {
   evidence?: string;
   suggested_action?: string;
   estimated_effort?: "hours" | "days" | "weeks";
+  page_hint?: number | null;
+  tex_line_hint?: number | null;
+  fix_hint?: FixHint | null;
+  applied?: boolean; // local state once "Fix now" has run successfully
 }
 
 export interface Verdict {
