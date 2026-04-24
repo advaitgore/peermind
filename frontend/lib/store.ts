@@ -8,8 +8,16 @@ import type {
   ReviewerOutput,
   Verdict,
 } from "./types";
+import { BACKEND_BASE } from "./api";
 
 export type AgentStatus = "idle" | "running" | "done" | "error";
+
+export interface ChatTurn {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  streaming?: boolean;
+}
 
 export type AgentId =
   | "orchestrator"
@@ -67,9 +75,37 @@ export interface JobState {
   literatureAll: LiteratureFinding[];
   codeAll: CodeRunResult[];
 
+  /** In-flight previews so the UI can show what the Scout / Code Runner
+   *  are doing while they run (they don't emit mid-stream tokens). */
+  scoutClaimsInFlight: string[];
+  codeBlocksInFlight: Array<{ block_id?: number; language: string; preview: string; lines?: number }>;
+
   patches: AutoApplyPatch[];
   actionPlan: ActionPlan | null;
   verdict: Verdict | null;
+
+  /** Streamed text from Opus's extended-thinking block during verdict
+   *  synthesis. Accumulates while `synthesisReasoningDone` is false. */
+  synthesisReasoning: string;
+  synthesisReasoningDone: boolean;
+
+  /** Rebuttal Co-Pilot state. `rebuttalText` accumulates as the agent
+   *  streams; `rebuttalStreaming` flips true between rebuttal_started and
+   *  rebuttal_complete. */
+  rebuttalText: string;
+  rebuttalStreaming: boolean;
+  rebuttalComplete: boolean;
+
+  /** Conversation-rail walkthrough state. `guideMode` starts as "pending"
+   *  (waiting for user to pick), flips to "step" when they accept the
+   *  walkthrough or "list" when they'd rather see everything at once. */
+  guideMode: "pending" | "step" | "list" | "done";
+  guideStep: number;
+
+  /** Chat turns rendered inline in the conversation rail. `streaming` flips
+   *  true while PeerMind's assistant reply is still arriving. */
+  chatMessages: ChatTurn[];
+  chatSending: boolean;
 
   pdfVersion: number; // monotonically increasing, used to force <iframe>/react-pdf reload
   pdfCompiling: boolean;
@@ -104,6 +140,10 @@ interface Actions {
   setMeta: (meta: Partial<Pick<JobState, "title" | "journal" | "journalFullName" | "mainTex" | "sourceType">>) => void;
   optimisticallyApply: (patchId: string) => void;
   optimisticallyReject: (patchId: string) => void;
+  setGuideMode: (mode: JobState["guideMode"]) => void;
+  advanceGuide: () => void;
+  loadChatHistory: (jobId: string) => Promise<void>;
+  sendChat: (jobId: string, text: string) => Promise<void>;
 }
 
 const INITIAL: Omit<JobState, "jobId"> = {
@@ -117,9 +157,20 @@ const INITIAL: Omit<JobState, "jobId"> = {
   rounds: {},
   literatureAll: [],
   codeAll: [],
+  scoutClaimsInFlight: [],
+  codeBlocksInFlight: [],
   patches: [],
   actionPlan: null,
   verdict: null,
+  synthesisReasoning: "",
+  synthesisReasoningDone: false,
+  rebuttalText: "",
+  rebuttalStreaming: false,
+  rebuttalComplete: false,
+  guideMode: "pending",
+  guideStep: 0,
+  chatMessages: [],
+  chatSending: false,
   pdfVersion: 0,
   pdfCompiling: false,
   lastCompileError: null,
@@ -164,6 +215,130 @@ export const useJob = create<JobState & Actions>((set, get) => ({
         p.patch_id === patchId ? { ...p, status: "rejected" } : p
       ),
     }));
+  },
+
+  setGuideMode(mode) {
+    set(() => ({ guideMode: mode, guideStep: 0 }));
+  },
+
+  advanceGuide() {
+    set((s) => {
+      const total = s.actionPlan?.author_required?.length ?? 0;
+      const next = s.guideStep + 1;
+      if (next >= total) {
+        return { guideStep: next, guideMode: "done" };
+      }
+      return { guideStep: next };
+    });
+  },
+
+  async loadChatHistory(jobId: string) {
+    try {
+      const resp = await fetch(`${BACKEND_BASE}/api/jobs/${jobId}/chat/messages`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const turns: ChatTurn[] = (data.messages || []).map((m: { id: string; role: string; content: string }) => ({
+        id: m.id,
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content,
+      }));
+      set(() => ({ chatMessages: turns }));
+    } catch {
+      /* ignore — history is just a nice-to-have */
+    }
+  },
+
+  async sendChat(jobId: string, text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (get().chatSending) return;
+    const userId = `u-${Date.now()}`;
+    const streamId = `a-${Date.now()}`;
+    set((s) => ({
+      chatSending: true,
+      chatMessages: [
+        ...s.chatMessages,
+        { id: userId, role: "user", content: trimmed },
+        { id: streamId, role: "assistant", content: "", streaming: true },
+      ],
+    }));
+    try {
+      const resp = await fetch(`${BACKEND_BASE}/api/jobs/${jobId}/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({ message: trimmed }),
+      });
+      if (!resp.ok || !resp.body) throw new Error(`chat_${resp.status}`);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          for (const line of frame.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const raw = line.slice(5).trim();
+            if (!raw) continue;
+            try {
+              const evt = JSON.parse(raw);
+              if (evt.type === "delta") {
+                const chunk = evt.text ?? "";
+                set((s) => ({
+                  chatMessages: s.chatMessages.map((m) =>
+                    m.id === streamId
+                      ? { ...m, content: m.content + chunk }
+                      : m
+                  ),
+                }));
+              } else if (evt.type === "done") {
+                set((s) => ({
+                  chatMessages: s.chatMessages.map((m) =>
+                    m.id === streamId
+                      ? { ...m, id: evt.id || streamId, streaming: false }
+                      : m
+                  ),
+                }));
+              } else if (evt.type === "error") {
+                set((s) => ({
+                  chatMessages: s.chatMessages.map((m) =>
+                    m.id === streamId
+                      ? {
+                          ...m,
+                          content: `⚠ ${evt.detail || "error"}`,
+                          streaming: false,
+                        }
+                      : m
+                  ),
+                }));
+              }
+            } catch {
+              /* ignore malformed frame */
+            }
+          }
+        }
+      }
+    } catch (e) {
+      set((s) => ({
+        chatMessages: s.chatMessages.map((m) =>
+          m.id === streamId
+            ? {
+                ...m,
+                content: `⚠ ${String((e as Error).message || e)}`,
+                streaming: false,
+              }
+            : m
+        ),
+      }));
+    } finally {
+      set(() => ({ chatSending: false }));
+    }
   },
 
   ingest(ev) {
@@ -254,6 +429,10 @@ export const useJob = create<JobState & Actions>((set, get) => ({
         }
         case "literature_started": {
           setAgent("scout", "running");
+          const d = ev.data as { claims?: string[] | number; count?: number };
+          if (Array.isArray(d.claims)) {
+            state.scoutClaimsInFlight = [...d.claims];
+          }
           return state;
         }
         case "literature_found": {
@@ -263,11 +442,25 @@ export const useJob = create<JobState & Actions>((set, get) => ({
           rnd.literature = findings;
           state.rounds[r] = rnd;
           state.literatureAll = [...s.literatureAll, ...findings];
+          state.scoutClaimsInFlight = [];
           setAgent("scout", "done");
           return state;
         }
         case "code_started": {
           setAgent("code_runner", "running");
+          const d = ev.data as {
+            blocks?:
+              | Array<{
+                  block_id?: number;
+                  language: string;
+                  preview: string;
+                  lines?: number;
+                }>
+              | number;
+          };
+          if (Array.isArray(d.blocks)) {
+            state.codeBlocksInFlight = [...d.blocks];
+          }
           return state;
         }
         case "code_run_result": {
@@ -277,6 +470,7 @@ export const useJob = create<JobState & Actions>((set, get) => ({
           rnd.code = results;
           state.rounds[r] = rnd;
           state.codeAll = [...s.codeAll, ...results];
+          state.codeBlocksInFlight = [];
           setAgent("code_runner", "done");
           return state;
         }
@@ -285,6 +479,35 @@ export const useJob = create<JobState & Actions>((set, get) => ({
           const rnd = { ...ensureRound(state, r) };
           rnd.converged = !!(ev.data as { converged?: boolean }).converged;
           state.rounds[r] = rnd;
+          return state;
+        }
+        case "synthesis_thinking": {
+          const text = (ev.data as { text?: string }).text ?? "";
+          state.synthesisReasoning = (s.synthesisReasoning || "") + text;
+          return state;
+        }
+        case "synthesis_thinking_done": {
+          state.synthesisReasoningDone = true;
+          return state;
+        }
+        case "rebuttal_started": {
+          state.rebuttalText = "";
+          state.rebuttalStreaming = true;
+          state.rebuttalComplete = false;
+          return state;
+        }
+        case "rebuttal_token": {
+          const text = (ev.data as { text?: string }).text ?? "";
+          state.rebuttalText = (s.rebuttalText || "") + text;
+          return state;
+        }
+        case "rebuttal_complete": {
+          state.rebuttalStreaming = false;
+          state.rebuttalComplete = true;
+          const full = (ev.data as { text?: string }).text;
+          if (typeof full === "string" && full.length > 0) {
+            state.rebuttalText = full;
+          }
           return state;
         }
         case "patch_applied": {

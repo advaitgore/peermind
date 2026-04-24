@@ -2,53 +2,92 @@
 
 **Your paper's toughest reviewer. In 90 seconds.**
 
-PeerMind is an AI-powered scientific peer review system that turns the 6-month peer review cycle into a 90-second feedback loop. Upload a LaTeX paper or PDF, pick your target venue (NeurIPS, ICML, ICLR, Nature, Science, arXiv), and PeerMind runs two adversarial reviewer agents — a **Skeptic** and a **Champion** — across three self-improving rounds. Between rounds, a **Literature Scout** finds missing and contradicting papers, and a **Code Runner** actually executes code blocks from your paper. A **Fix Agent** then produces unified-diff patches that edit your `.tex` source, recompile the PDF, and stream the updated preview back to you live.
+PeerMind compresses the 3–6 month scientific peer-review cycle into a ~90-second multi-agent conversation. Upload a LaTeX project (or arXiv ID, or PDF), pick a target venue (NeurIPS, ICML, ICLR, Nature, Science, arXiv, or a custom venue), and PeerMind runs **six Claude Managed Agents** in parallel: two reviewers, a literature scout, a code runner, a fix agent, and an orchestrator that synthesizes the verdict with **Opus 4.7 extended thinking streamed live to the UI**. Apply the fix-agent patches inline with one-click Yes/No confirms, watch the paper recompile in a Docker-sandboxed `latexmk`, and export the patched project back to Overleaf as a zip — or draft a venue-style rebuttal with the co-pilot in the same breath.
 
 Built for the [Built with Opus 4.7 × Cerebral Valley](https://cerebralvalley.ai/e/built-with-4-7-hackathon) hackathon.
 
-## Why this exists
+## The three things that make this feel different
 
-Scientific peer review is broken. Papers wait 6+ months. Reviewers miss contradicting literature. Nobody checks if the code runs. PeerMind fixes all three in 90 seconds — journal-specific rubrics, real-time multi-agent critique, executed code, and patched source. Built by a researcher-engineer who has lived the bottleneck from both sides.
+1. **Opus 4.7 extended thinking, exposed as a UI surface.** When synthesis runs, the reasoning tokens stream into a collapsible "Reasoning trace" bubble in the conversation rail — you literally watch Opus 4.7 weigh consensus issues, reconcile reviewer disagreement, and arrive at a calibrated acceptance-probability number. Not a log file. A first-class experience.
+2. **Six Managed Agents, one narrator voice.** The right rail isn't a dashboard of cards — it's a conversation with a single persona (PeerMind) that narrates what each agent is doing, opens inline dropdowns to show *live* reviewer tokens, scout searches, and code runs, and guides the author through fixes one issue at a time. Real long-running task orchestration, surfaced as a chat.
+3. **Round-trip that actually closes.** Fix Agent produces unified diffs, `unidiff` applies them, `latexmk` recompiles in a `texlive/texlive` Docker sandbox, the PDF re-renders live, and a zip export drops straight back into Overleaf. Reviews usually end at "you should fix X" — PeerMind ends at *X is fixed*.
 
 ## Architecture
 
 ```
-                         ┌──────────────────────────────────────┐
-                         │  FastAPI + SSE event bus (backend/)  │
-                         └──────────────────────────────────────┘
-                                          │
-                        ┌─────────────────┴─────────────────┐
-                        │                                   │
-                ┌───────▼────────┐                 ┌────────▼─────────┐
-                │  Orchestrator  │  Managed Agent  │  MCP servers     │
-                │  Opus 4.7      │  (coordinator)  │  • literature    │
-                └───────┬────────┘                 │  • latex-tools   │
-                        │                          └──────────────────┘
-        ┌───────────────┼──────────────────┬─────────────┬────────────┐
-        │               │                  │             │            │
-  ┌─────▼──────┐ ┌──────▼─────┐ ┌──────────▼────┐ ┌──────▼─────┐ ┌────▼──────┐
-  │  Skeptic   │ │  Champion  │ │  Lit Scout    │ │ Code Runner│ │ Fix Agent │
-  │  Opus 4.7  │ │  Opus 4.7  │ │  Sonnet 4.5   │ │ Sonnet 4.5 │ │ Sonnet 4.5│
-  └────────────┘ └────────────┘ └───────────────┘ └────────────┘ └───────────┘
-        ▲               ▲
-        └─── Agent Skill: adversarial-reviewer / constructive-reviewer
-             loaded with the target journal's rubric at session creation
+  ┌────────────────────────────┐     ┌────────────────────────┐
+  │ Next.js 15 + Tailwind v4   │◀───▶│ FastAPI (async) + SSE  │
+  │ • conversation rail        │     │ • Managed Agents SDK   │
+  │ • react-pdf + Monaco       │     │ • SQLAlchemy / aiosqlite│
+  │ • Zustand + Framer Motion  │     │ • event bus per job    │
+  └────────────────────────────┘     └──────────┬─────────────┘
+                                                 │
+                ┌────────────────────────────────┼────────────────────────────┐
+                │                                │                            │
+           ┌────▼────┐                   ┌───────▼────────┐           ┌──────▼──────┐
+           │Orchestr.│                   │  MCP servers   │           │ Docker sbx  │
+           │Opus 4.7 │                   │ • lit-search   │           │ texlive+    │
+           │+thinking│                   │ • latex-tools  │           │ latexmk     │
+           └────┬────┘                   │ • semantic-sch │           └─────────────┘
+                │                        └────────────────┘
+   ┌────────────┼────────────┬──────────────┬──────────────┐
+   │            │            │              │              │
+ ┌─▼────┐  ┌────▼───┐  ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐
+ │Rev 1 │  │ Rev 2  │  │ Lit Scout │  │Code Runner│  │ Fix Agent │
+ │Sonnet│  │ Sonnet │  │  Sonnet   │  │  Sonnet   │  │ Opus 4.7  │
+ │ 4.5  │  │  4.5   │  │   4.5     │  │    4.5    │  │           │
+ └──────┘  └────────┘  └───────────┘  └───────────┘  └───────────┘
+      ▲         ▲            ▲              ▲              ▲
+      └ Agent Skills: skeptic / champion / scout / code-runner / fix-agent
+        (venue rubric injected into system prompt at session creation)
+
+        Synthesis  (Opus 4.7 + extended thinking, streamed as UI trace)
+        Rebuttal   (Sonnet 4.5, concede/clarify/refute, streamed as letter)
+        Chat       (Sonnet 4.5, prompt-cached paper context)
 ```
 
-Every role is a real **Claude Managed Agent** — `client.beta.agents.create()` with its own model, system prompt, tools, and (optionally) `callable_agents`. Each agent runs in its own session and streams events back through our FastAPI SSE bridge.
+Every role is a real **Claude Managed Agent** via `client.beta.agents.create` with its own system prompt (via Agent Skills JSON), model, and tools. Reviewers + scout + code runner + compile kick off in a single `asyncio.gather`; synthesis and fix-agent run in **parallel** afterwards (Fix Agent reads the raw reviews, not the synthesized verdict, so both Opus 4.7 calls overlap — saving ~60s per review).
 
-**Self-improving loop:** After round 1, the Orchestrator computes **critique delta** (Jaccard similarity over `key_claims_to_verify`) and either runs another round or synthesizes the verdict. Literature findings and code-execution results are injected into the next round's context.
+## Why Opus 4.7
 
-**Live LaTeX patching:** The Fix Agent emits unified diffs classified `AUTO_APPLY` (safe: citation fixes, notation, formatting) or `AUTHOR_REQUIRED` (risky: new experiments, claim rewrites). Applied patches trigger `latexmk` in a `texlive/texlive` Docker sandbox; the PDF updates live. On compile failure, we auto-rollback and mark the patch for manual review.
+- **Verdict synthesis with extended thinking.** `thinking.budget_tokens=2048`, `max_tokens=4096`. Every `thinking_delta` event is fanned out to the SSE bus as a `synthesis_thinking` event; the UI assembles them into a live trace. Judges see Opus reason about their paper in real time.
+- **Fix Agent with rigorous diff generation + severity judgment.** Unified diffs must match source lines exactly; deciding whether a reviewer concern can be partially addressed via prose (a limitation sentence, a `\cite{TODO-X}` placeholder, a survivorship-bias caveat) versus requiring true author work needs careful reasoning. Opus 4.7 earns the spend.
+
+**Model routing:**
+
+| Role | Model | Why |
+|---|---|---|
+| Verdict synthesis | **Opus 4.7** (+ extended thinking) | Reasoning trace is a live UI surface |
+| Fix Agent | **Opus 4.7** | Unified-diff correctness + severity judgment |
+| Reviewer 1 / 2 (Skeptic / Champion) | Sonnet 4.5 | Speed on the critical path (~25 s each, parallel) |
+| Literature Scout | Sonnet 4.5 | MCP tool-use over Semantic Scholar / arXiv |
+| Code Runner | Sonnet 4.5 | Bash tool-use in the Docker sandbox |
+| Chat ("Ask PeerMind") | Sonnet 4.5 (+ prompt caching) | Fast Q&A, paper context cached across turns |
+| Rebuttal Co-Pilot | Sonnet 4.5 (+ prompt caching) | Streamed live; cached paper + verdict reused on re-draft |
+| Venue auto-detect | Haiku 4.5 | Cheap classifier at upload |
+
+Prompt caching is applied to the paper-context blobs in the chat and rebuttal endpoints (`cache_control: {"type": "ephemeral"}`) so subsequent chat turns or a "Re-draft" click inside the 5-minute TTL reuse cached tokens.
+
+## Features
+
+- **Venue-aware review.** Six built-in rubrics (NeurIPS, ICML, ICLR, Nature, Science, arXiv) + a custom venue option. Haiku 4.5 suggests the venue at upload; user confirms.
+- **Conversation rail.** The right rail narrates the pipeline in PeerMind's voice: a greeting on arrival, per-reviewer streaming bubbles with live-token dropdowns, Scout + Code Runner dropdowns showing the exact claims being searched / blocks being executed, an extended-thinking reasoning trace, the verdict card with acceptance-probability bar, and a guided walkthrough.
+- **Guided fix walkthrough.** One issue at a time. For a minor item with a concrete prose fix, PeerMind asks *"Would you like me to make this change?"* — Yes applies the diff, flashes the target page in the PDF, and auto-advances to the next issue. For critical items it shows the concern + recommended author action and lets you skip.
+- **Live LaTeX round-trip.** `unidiff` applies patches to the source on disk, `latexmk` recompiles inside a `texlive/texlive` Docker container (with a `.peermind-bak` rollback snapshot), the PDF re-renders in the react-pdf viewer via a cache-busting version token.
+- **Acceptance-probability meter.** Calibrated 0-1 estimate from Opus 4.7's synthesis — separate from "confidence." Visualized as a horizontal bar (red/amber/green).
+- **Rebuttal Co-Pilot.** Streams a venue-style author response classifying each reviewer concern as *concede*, *clarify*, or *refute*. Copy to clipboard, open as a printable HTML letter, or re-draft.
+- **Overleaf round-trip zip.** `GET /api/jobs/{id}/export.zip` walks the (post-patch) source directory, skips latexmk artefacts + backup snapshots, includes the final compiled PDF, and drops a `PEERMIND_REPORT.md` at the root. Unzip → Overleaf → New Project → Upload Project → compiles with zero manual fixup.
+- **Review letter export.** Printable HTML version of the full review (verdict, consensus issues, arbitrated disagreements, action plan, applied patches). Ctrl+P → Save as PDF.
+- **Three custom MCP servers.** `literature_search` (Semantic Scholar + arXiv), `latex_tools` (compile, diff-apply), and `semantic_scholar`. Shared implementations between the Managed Agent tools and the standalone MCP binaries.
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/YOUR_ORG/peermind
+git clone https://github.com/advaitgore/peermind
 cd peermind
 cp .env.example .env            # then fill in ANTHROPIC_API_KEY
 
-# Build the LaTeX compile sandbox (used by the Fix Agent's recompile loop)
+# Build the LaTeX compile sandbox used by the Fix Agent + initial compile.
 docker build -t peermind-latex:local -f docker/latex.Dockerfile .
 
 # Backend — run from the project root so relative imports resolve.
@@ -61,12 +100,14 @@ npm install
 npm run dev                     # http://localhost:3000
 ```
 
-Alternatively, the whole stack runs via `docker compose up --build` (builds `peermind-latex:local` via the `build-only` profile first):
+Alternatively, `docker compose up --build` runs the whole stack (build the LaTeX image first via the `build-only` profile):
 
 ```bash
 docker compose --profile build-only build latex
 docker compose up --build
 ```
+
+Then open http://localhost:3000, drop in a `.tex` file or `.zip` of an Overleaf project, paste an arXiv ID, or click **Demo mode** to preload a sample paper.
 
 ### Running the MCP servers standalone
 
@@ -78,28 +119,34 @@ python -m backend.mcp_servers.literature_search.server  # stdio MCP server
 python -m backend.mcp_servers.latex_tools.server        # stdio MCP server
 ```
 
-Then open http://localhost:3000, drop in a `.tex` file, or hit **Demo mode** to preload the arXiv Self-Refine paper and run an end-to-end review on NeurIPS rubric.
-
 ## Tech stack
 
 | Layer | Pieces |
 |---|---|
-| Agents | `anthropic` SDK (Claude Managed Agents beta: `managed-agents-2026-04-01`) |
-| Backend | FastAPI (async), SQLAlchemy+aiosqlite, SSE, kreuzberg for extraction |
-| MCP | Official Python MCP SDK — 2 custom servers (literature, latex-tools) |
-| Frontend | Next.js 15 (App Router) + TypeScript, Tailwind v4, shadcn/ui, Monaco Editor, react-pdf, Zustand, Framer Motion |
-| Compile sandbox | `texlive/texlive` Docker image, `latexmk` with 60s timeout |
+| Agents | `anthropic` SDK 0.96.0 — `client.beta.agents`, `client.beta.environments`, `client.beta.sessions` (Managed Agents beta `managed-agents-2026-04-01`) |
+| Backend | FastAPI (async), SQLAlchemy + aiosqlite, sse-starlette, `unidiff`, kreuzberg for PDF text extraction |
+| MCP | Official Python MCP SDK — 3 custom stdio servers; shared tool implementations with the in-process agent tools |
+| Frontend | Next.js 15 (App Router) + TypeScript, Tailwind v4, Zustand, Framer Motion, react-pdf, Monaco Editor |
+| Compile sandbox | `texlive/texlive` Docker image, `latexmk -shell-escape -f -bibtex`, 60 s timeout, auto-rollback on failure |
 
-## Models
+## What's in the repo
 
-| Role | Model | Why |
-|---|---|---|
-| Orchestrator | `claude-opus-4-7` | Synthesis, convergence checks, extended thinking for the verdict |
-| Reviewer Skeptic | `claude-opus-4-7` | Rigorous adversarial critique |
-| Reviewer Champion | `claude-opus-4-7` | Generous constructive critique |
-| Literature Scout | `claude-sonnet-4-5` | Fast search + summarization over Semantic Scholar/arXiv |
-| Code Runner | `claude-sonnet-4-5` | Container-side code execution via bash |
-| Fix Agent | `claude-sonnet-4-5` | Unified-diff generation |
+```
+backend/
+  agents/                # one file per Managed Agent spec
+  skills/                # Agent Skills — JSON system prompts with {rubric} injection
+  mcp_servers/           # 3 stdio MCP servers (shared impls with agents/ tools)
+  journal_profiles/      # 6 venue rubrics + custom profile
+  utils/                 # LaTeX parsing, \input resolution, diff application, arxiv fetch
+  models/                # SQLAlchemy models + pydantic schemas (mirrored in frontend/lib/types.ts)
+  main.py                # FastAPI endpoints, SSE stream, zip export, review letter
+frontend/
+  app/review/[jobId]/    # workbench page
+  components/            # ConversationRail, GuidedActionPlan, VerdictCard, ReasoningTrace,
+                         # RebuttalPanel, RailFooter, PDFPreview, LaTeXEditor, etc.
+  lib/                   # Zustand store, SSE ingestion, API client
+docker/                  # compile-sandbox Dockerfile + compose
+```
 
 ## License
 

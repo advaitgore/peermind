@@ -11,14 +11,14 @@ from .skills import load_skill
 def build_fix_agent_spec() -> AgentSpec:
     skill = load_skill("fix_agent")
     return AgentSpec(
-        # Opus 4.7 because generating unified diffs correctly — matching line
-        # numbers, exact context, and judging auto-apply vs. author-required
-        # severity — needs the stronger reasoning. Worth the spend.
+        # Opus 4.7 on Fix Agent: diff correctness + citation reasoning needs
+        # the stronger model. Max_tokens trimmed to 6k — the output is
+        # structured JSON; 8k was wasted.
         name="peermind-fix-agent",
         model="claude-opus-4-7",
         system=skill.system_prompt_template,
         tools=[{"type": "agent_toolset_20260401"}],
-        max_tokens=8192,
+        max_tokens=6144,
     )
 
 

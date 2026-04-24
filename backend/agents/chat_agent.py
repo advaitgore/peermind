@@ -64,17 +64,30 @@ async def stream_chat_response(
     settings = get_settings()
     client = AsyncAnthropic(api_key=settings.anthropic_api_key or None)
 
-    system = _build_system_prompt(job)
+    system_text = _build_system_prompt(job)
+    # Prompt caching on the paper + verdict + action plan. The first chat
+    # turn pays the full cost; every subsequent turn within the 5-minute
+    # cache TTL reuses the cached tokens — faster + cheaper.
+    system_blocks = [
+        {
+            "type": "text",
+            "text": system_text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
     messages: list[dict[str, Any]] = []
     for turn in history:
         if turn.get("role") in ("user", "assistant") and turn.get("content"):
             messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": user_message})
 
+    # Sonnet 4.5 for chat: Q&A over the paper doesn't need extended reasoning,
+    # and Sonnet responds 2-3x faster, which matters for a conversational
+    # loop. Opus 4.7 is reserved for the verdict synthesis and the Fix Agent.
     async with client.messages.stream(
-        model="claude-opus-4-7",
+        model="claude-sonnet-4-5",
         max_tokens=2048,
-        system=system,
+        system=system_blocks,
         messages=messages,
     ) as stream:
         async for text in stream.text_stream:

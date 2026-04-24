@@ -253,9 +253,16 @@ async def _run_scout(
 ) -> list[dict[str, Any]]:
     if not claims:
         return []
+    # Include the actual claim strings so the UI can show what the Scout
+    # is searching for while the agent runs.
     await bus.publish(
         job_id,
-        ReviewEvent(event_type="literature_started", agent="scout", round=round_num, data={"claims": len(claims)}),
+        ReviewEvent(
+            event_type="literature_started",
+            agent="scout",
+            round=round_num,
+            data={"claims": claims, "count": len(claims)},
+        ),
     )
     spec = build_scout_spec()
     user_msg = build_scout_user_message(claims, paper_title, paper_abstract)
@@ -279,13 +286,24 @@ async def _run_code(
 ) -> list[dict[str, Any]]:
     if not code_blocks:
         return []
+    # Include a lightweight preview (language + first line) of each block
+    # so the UI can show what the Code Runner is about to execute.
+    previews = [
+        {
+            "block_id": b.get("block_id"),
+            "language": b.get("language") or "unknown",
+            "preview": (b.get("code") or "").splitlines()[0][:140] if b.get("code") else "",
+            "lines": len((b.get("code") or "").splitlines()),
+        }
+        for b in code_blocks
+    ]
     await bus.publish(
         job_id,
         ReviewEvent(
             event_type="code_started",
             agent="code_runner",
             round=round_num,
-            data={"blocks": len(code_blocks)},
+            data={"blocks": previews, "count": len(code_blocks)},
         ),
     )
     spec = build_code_runner_spec()
@@ -309,6 +327,7 @@ async def _run_code(
 
 
 async def _synthesize_verdict(
+    job_id: str,
     journal: dict[str, Any],
     all_round_reviews: list[dict[str, Any]],
     lit: list[dict[str, Any]],
@@ -337,34 +356,82 @@ async def _synthesize_verdict(
     settings = get_settings()
     client = AsyncAnthropic(api_key=settings.anthropic_api_key or None)
 
-    # Extended thinking for the synthesis step — this is where we earn the
-    # extra tokens: weighing both reviewers against literature + code evidence.
+    # Stream the synthesis step with extended thinking. Thinking deltas flow
+    # to the UI as they arrive so the user watches Opus reason about the
+    # evidence. Text deltas accumulate into the final JSON buffer.
+    async def _stream(enable_thinking: bool) -> str:
+        kwargs: dict[str, Any] = dict(
+            model="claude-opus-4-7",
+            # 4k is enough for the verdict JSON + one-line prose. 8k was
+            # overprovisioned and cost ~30s of extra generation time.
+            max_tokens=4096,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        if enable_thinking:
+            # Half the previous budget — still visible, a lot faster.
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": 2048}
+        buf: list[str] = []
+        saw_thinking = False
+        done_emitted = False
+        async with client.messages.stream(**kwargs) as stream:
+            async for ev in stream:
+                etype = getattr(ev, "type", None)
+                if etype == "content_block_delta":
+                    delta = getattr(ev, "delta", None)
+                    dtype = getattr(delta, "type", None)
+                    if dtype == "thinking_delta":
+                        saw_thinking = True
+                        chunk = getattr(delta, "thinking", "") or ""
+                        if chunk:
+                            await bus.publish(
+                                job_id,
+                                ReviewEvent(
+                                    event_type="synthesis_thinking",
+                                    agent="orchestrator",
+                                    data={"text": chunk},
+                                ),
+                            )
+                    elif dtype == "text_delta":
+                        buf.append(getattr(delta, "text", "") or "")
+                elif etype == "content_block_stop":
+                    # When a thinking block closes, notify the UI so it can
+                    # flip the ReasoningTrace into its settled state.
+                    block = getattr(ev, "content_block", None)
+                    if block is not None and getattr(block, "type", None) == "thinking":
+                        done_emitted = True
+                        await bus.publish(
+                            job_id,
+                            ReviewEvent(
+                                event_type="synthesis_thinking_done",
+                                agent="orchestrator",
+                                data={},
+                            ),
+                        )
+        # Safety: if thinking was enabled and we saw deltas but the SDK didn't
+        # surface the stop event, still send the terminator so the UI doesn't
+        # stay stuck on a spinner.
+        if enable_thinking and saw_thinking and not done_emitted:
+            await bus.publish(
+                job_id,
+                ReviewEvent(
+                    event_type="synthesis_thinking_done",
+                    agent="orchestrator",
+                    data={},
+                ),
+            )
+        return "".join(buf)
+
     try:
-        msg = await client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=8192,
-            thinking={"type": "enabled", "budget_tokens": 4096},
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        text = "".join(
-            getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text"
-        )
+        text = await _stream(enable_thinking=True)
     except Exception:
-        # Extended thinking may not be enabled on the account; fall back.
-        msg = await client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=8192,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        text = "".join(
-            getattr(b, "text", "") for b in msg.content if getattr(b, "type", None) == "text"
-        )
+        # Extended thinking may not be available; fall back to plain stream.
+        text = await _stream(enable_thinking=False)
 
     return extract_json(text) or {
         "recommendation": "borderline",
         "confidence": 0.3,
+        "acceptance_probability": 0.3,
         "one_line_verdict": "Unable to synthesize — see individual reviews.",
         "reviewer_recommendations": {},
         "consensus_issues": [],
@@ -389,10 +456,12 @@ async def _run_fix_agent(
     user_msg = build_fix_user_message(paper_source, verdict, all_reviews, lit, code, main_tex_name)
     out = await factory.run_session(spec, user_msg)
     parsed = extract_json(out) or {"auto_apply_patches": [], "author_required": []}
-    # Ensure patch_ids exist.
+    # Always regenerate patch_ids. The model sometimes pattern-matches the
+    # "p_<8-hex>" placeholder in the skill prompt and returns sequential
+    # values like p_a1b2c3d4 that collide across runs → UNIQUE constraint
+    # failures at insert time. IDs are backend-only; the UI never sees them.
     for p in parsed.get("auto_apply_patches", []):
-        if "patch_id" not in p or not p["patch_id"]:
-            p["patch_id"] = "p_" + uuid.uuid4().hex[:8]
+        p["patch_id"] = "p_" + uuid.uuid4().hex[:10]
     return parsed
 
 
@@ -507,18 +576,9 @@ async def run_review_pipeline(
             ),
         )
 
-        # Optional scout refine: only if reviewers produced claims that weren't
-        # covered by our heuristic seed.
-        reviewer_claims = (skeptic_out.get("key_claims_to_verify") or []) + (
-            champion_out.get("key_claims_to_verify") or []
-        )
-        new_claims = [c for c in reviewer_claims if not _claim_covered(c, seed_claims)]
-        if new_claims:
-            extra = await _run_scout(
-                job_id, 1, new_claims[:3],
-                job.paper_title or job.title, paper_text[:4000],
-            )
-            lit_findings.extend(extra)
+        # (Scout refine pass removed — it was sequential after reviewers
+        # finished and added 15-30s with marginal value. Synthesis + Fix
+        # Agent already reason over the seed scout's findings.)
 
         await bus.publish(
             job_id,
@@ -536,31 +596,63 @@ async def run_review_pipeline(
         except Exception:
             pass
 
-        # Synthesize the verdict with extended thinking.
-        verdict = await _synthesize_verdict(journal, all_round_reviews, lit_findings, code_results)
+        # Synthesis + fix-agent run in PARALLEL. The Fix Agent doesn't need
+        # the final synthesized verdict — it already has the full reviewer
+        # outputs, lit findings, and code results to work from. We hand it a
+        # lightweight pre-verdict draft (just the two reviewer recs) so it
+        # can bias severity picks. This cuts ~60s of serial Opus-4.7 time.
+        pre_verdict_draft = {
+            "reviewer_recommendations": {
+                "skeptic": skeptic_out.get("recommendation"),
+                "champion": champion_out.get("recommendation"),
+            },
+            "note": "Preliminary — final synthesis running in parallel.",
+        }
+        main_tex_name = job.main_tex or "main.tex"
+        paper_source = ""
+        if job.main_tex:
+            paper_source = (Path(job.source_dir) / job.main_tex).read_text(
+                encoding="utf-8", errors="replace"
+            )
+
+        verdict_task = asyncio.create_task(
+            _synthesize_verdict(
+                job_id, journal, all_round_reviews, lit_findings, code_results
+            )
+        )
+        if job.main_tex:
+            fix_task = asyncio.create_task(
+                _run_fix_agent(
+                    job_id,
+                    paper_source,
+                    pre_verdict_draft,
+                    all_round_reviews,
+                    lit_findings,
+                    code_results,
+                    main_tex_name,
+                )
+            )
+        else:
+            async def _no_fix():
+                return {"auto_apply_patches": [], "author_required": []}
+            fix_task = asyncio.create_task(_no_fix())
+
+        verdict, action_plan = await asyncio.gather(verdict_task, fix_task)
+
+        # Persist verdict immediately so downstream endpoints (Rebuttal
+        # Co-Pilot, review letter) work while patches are still being
+        # persisted. Final commit below layers action_plan + status on top.
+        async with sm() as session:
+            j = await session.get(Job, job_id)
+            if j is not None:
+                j.verdict_json = verdict
+                await session.commit()
         await bus.publish(
             job_id,
             ReviewEvent(
                 event_type="verdict_ready", agent="orchestrator", data={"verdict": verdict}
             ),
         )
-
-        # Fix agent: patches + action plan.
-        main_tex_name = job.main_tex or "main.tex"
-        action_plan = {"auto_apply_patches": [], "author_required": []}
-        if job.main_tex:
-            paper_source = (Path(job.source_dir) / job.main_tex).read_text(
-                encoding="utf-8", errors="replace"
-            )
-            action_plan = await _run_fix_agent(
-                job_id,
-                paper_source,
-                verdict,
-                all_round_reviews,
-                lit_findings,
-                code_results,
-                main_tex_name,
-            )
 
         # Persist patches.
         async with sm() as session:

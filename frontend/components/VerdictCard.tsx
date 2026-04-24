@@ -2,8 +2,7 @@
 
 import { motion } from "framer-motion";
 import type { Verdict } from "@/lib/types";
-import { BACKEND_BASE } from "@/lib/api";
-import { ExternalLink, Package, TrendingUp } from "lucide-react";
+import { TrendingUp } from "lucide-react";
 
 function prettyRec(r: string | undefined) {
   if (!r) return "—";
@@ -19,11 +18,9 @@ function recColor(rec: string): string {
 
 export function VerdictCard({
   verdict,
-  jobId,
   critiqueDelta,
 }: {
   verdict: Verdict | null;
-  jobId?: string;
   critiqueDelta?: number;
 }) {
   if (!verdict) {
@@ -43,6 +40,19 @@ export function VerdictCard({
     critiqueDelta === undefined
       ? null
       : Math.round((1 - Math.min(Math.max(critiqueDelta, 0), 1)) * 100);
+  const acceptance =
+    typeof verdict.acceptance_probability === "number"
+      ? Math.max(0, Math.min(1, verdict.acceptance_probability))
+      : null;
+  const acceptPct = acceptance === null ? null : Math.round(acceptance * 100);
+  const acceptColor =
+    acceptance === null
+      ? "var(--color-primary-strong)"
+      : acceptance >= 0.6
+      ? "var(--color-champion)"
+      : acceptance >= 0.35
+      ? "var(--color-warning)"
+      : "var(--color-skeptic)";
 
   return (
     <motion.div
@@ -82,6 +92,34 @@ export function VerdictCard({
           </p>
         )}
       </div>
+
+      {/* Acceptance probability meter — Opus's calibrated estimate */}
+      {acceptPct !== null && (
+        <div>
+          <div className="flex items-baseline justify-between mb-1.5">
+            <span className="eyebrow">Acceptance probability</span>
+            <span
+              className="font-mono font-semibold tabular-nums"
+              style={{ fontSize: "var(--text-sm)", color: acceptColor }}
+            >
+              {acceptPct}%
+            </span>
+          </div>
+          <div
+            className="relative h-1.5 rounded-full overflow-hidden"
+            style={{ background: "var(--color-surface-2)" }}
+            title={`Probability the paper would be accepted at the target venue as-is`}
+          >
+            <motion.div
+              initial={{ width: 0 }}
+              animate={{ width: `${acceptPct}%` }}
+              transition={{ duration: 0.8, ease: "easeOut" }}
+              className="absolute inset-y-0 left-0 rounded-full"
+              style={{ background: acceptColor }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Reviewer split */}
       {verdict.reviewer_recommendations && (
@@ -126,29 +164,6 @@ export function VerdictCard({
         </div>
       )}
 
-      {/* Export links — download project zip + review letter */}
-      {jobId && (
-        <div className="pt-[var(--space-2)] flex flex-col gap-1.5">
-          <a
-            href={`${BACKEND_BASE}/api/jobs/${jobId}/export.zip`}
-            download
-            className="btn-ghost inline-flex items-center gap-1.5 text-[var(--text-sm)] self-start"
-            title="Downloads the project tree with applied patches + a review report, ready to drop into Overleaf"
-          >
-            <Package size={13} />
-            <span>Download project (zip) for Overleaf</span>
-          </a>
-          <a
-            href={`${BACKEND_BASE}/api/jobs/${jobId}/review-letter`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-ghost inline-flex items-center gap-1.5 text-[var(--text-sm)] self-start"
-          >
-            <ExternalLink size={13} />
-            <span>Export full review letter</span>
-          </a>
-        </div>
-      )}
     </motion.div>
   );
 }

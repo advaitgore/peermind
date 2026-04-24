@@ -21,12 +21,14 @@ def build_skeptic_spec(journal: dict[str, Any]) -> AgentSpec:
     system = render_prompt(skill.system_prompt_template, ctx)
     return AgentSpec(
         name=f"peermind-skeptic-{journal.get('id', 'unknown')}",
-        model="claude-opus-4-7",
+        # Sonnet 4.5 on reviewers — ~2-3× faster than Opus for this scale of
+        # task and critiques are not materially worse. Synthesis (Opus 4.7
+        # with extended thinking) is where we earn back quality.
+        model="claude-sonnet-4-5",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
-        # Prose comments + structured JSON both fit in this budget. The prose
-        # part streams first (visible UX); the JSON lands at the end.
-        max_tokens=6144,
+        # Keep the budget tight — reviewer JSON + prose fit in 3k comfortably.
+        max_tokens=3072,
     )
 
 

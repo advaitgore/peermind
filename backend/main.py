@@ -24,6 +24,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .agents.chat_agent import stream_chat_response
 from .agents.orchestrator import run_review_pipeline
+from .agents.rebuttal_agent import draft_rebuttal
 from .agents.venue_detector import detect_venue
 from .config import get_settings
 from .event_bus import bus
@@ -951,6 +952,141 @@ async def review_letter(job_id: str) -> HTMLResponse:
 async def list_journals() -> JSONResponse:
     path = Path(__file__).parent / "journal_profiles" / "profiles.json"
     return JSONResponse(json.loads(path.read_text()))
+
+
+# ---------- Rebuttal Co-Pilot ----------
+
+
+@app.post("/api/jobs/{job_id}/rebuttal")
+async def generate_rebuttal(job_id: str) -> JSONResponse:
+    """Kick off a rebuttal draft in the background. Tokens stream over the
+    existing /stream SSE endpoint via rebuttal_* events — no separate channel.
+    """
+    job = await _get_job(job_id)
+    if not job.verdict_json:
+        raise HTTPException(400, "Verdict not ready — cannot draft rebuttal yet.")
+
+    asyncio.create_task(draft_rebuttal(job_id))
+    return JSONResponse({"status": "started"})
+
+
+@app.get("/api/jobs/{job_id}/rebuttal")
+async def get_rebuttal(job_id: str) -> JSONResponse:
+    """Return the latest persisted rebuttal draft, or 404 if none exists."""
+    job = await _get_job(job_id)
+    if not job.rebuttal_text:
+        raise HTTPException(404, "No rebuttal draft yet")
+    return JSONResponse({"text": job.rebuttal_text})
+
+
+@app.get("/api/jobs/{job_id}/rebuttal-letter", response_class=HTMLResponse)
+async def rebuttal_letter(job_id: str) -> HTMLResponse:
+    """Render the rebuttal draft as a printable HTML letter.
+
+    Users can Ctrl+P → Save as PDF to produce a clean author-response
+    document to paste into a submission system.
+    """
+    job = await _get_job(job_id)
+    if not job.rebuttal_text:
+        raise HTTPException(404, "No rebuttal draft yet — run 'Draft rebuttal' first.")
+
+    paper_title = (job.paper_title or job.title or "Untitled paper").strip()
+    venue = (job.journal or "").upper() or "—"
+
+    import html as _html
+
+    # Minimal markdown → HTML (headers, bold, lists). We trust the agent's
+    # markdown structure but escape all text inside.
+    lines = job.rebuttal_text.splitlines()
+    out_parts: list[str] = []
+    in_list = False
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            out_parts.append("</ul>")
+            in_list = False
+
+    for raw in lines:
+        line = raw.rstrip()
+        if not line.strip():
+            close_list()
+            out_parts.append("")
+            continue
+        if line.startswith("# "):
+            close_list()
+            out_parts.append(f"<h1>{_html.escape(line[2:])}</h1>")
+        elif line.startswith("## "):
+            close_list()
+            out_parts.append(f"<h2>{_html.escape(line[3:])}</h2>")
+        elif line.startswith("### "):
+            close_list()
+            out_parts.append(f"<h3>{_html.escape(line[4:])}</h3>")
+        elif line.lstrip().startswith("- "):
+            if not in_list:
+                out_parts.append("<ul>")
+                in_list = True
+            item = line.lstrip()[2:]
+            out_parts.append(f"<li>{_md_inline(item)}</li>")
+        else:
+            close_list()
+            out_parts.append(f"<p>{_md_inline(line)}</p>")
+    close_list()
+    body_html = "\n".join(out_parts)
+
+    html_doc = f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8" />
+<title>Rebuttal — {_html.escape(paper_title)}</title>
+<style>
+  :root {{
+    --fg: #1a1917; --dim: #4a4944; --faint: #8a8982;
+    --border: rgba(0,0,0,0.12); --accent: #01696f;
+    --paper: #fbfbf9;
+  }}
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; padding: 0; background: #f3f1ec; color: var(--fg);
+    font-family: 'Georgia','Times New Roman',serif; line-height: 1.6; }}
+  .letter {{ max-width: 780px; margin: 40px auto; background: var(--paper);
+    padding: 56px 72px; border: 1px solid var(--border); box-shadow: 0 1px 8px rgba(0,0,0,0.04); }}
+  .eyebrow {{ font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--faint); }}
+  h1 {{ font-size: 24px; margin: 6px 0 18px; color: var(--fg); }}
+  h2 {{ font-size: 16px; margin: 28px 0 10px; color: var(--accent);
+    border-bottom: 1px solid var(--border); padding-bottom: 4px; letter-spacing: 0.02em; }}
+  h3 {{ font-size: 14px; margin: 18px 0 6px; color: var(--fg); }}
+  p {{ margin: 10px 0; font-size: 14px; }}
+  ul {{ padding-left: 22px; margin: 8px 0; }}
+  li {{ margin-bottom: 6px; font-size: 14px; }}
+  strong {{ color: var(--fg); }}
+  .meta {{ font-size: 12px; color: var(--dim); margin-bottom: 18px; }}
+  .footer {{ margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--faint); letter-spacing: 0.04em; text-transform: uppercase; }}
+  @media print {{
+    body {{ background: white; }}
+    .letter {{ margin: 0; border: 0; box-shadow: none; }}
+  }}
+</style>
+</head>
+<body>
+<div class="letter">
+<div class="eyebrow">Author Response · {_html.escape(venue)}</div>
+<div class="meta">Paper: {_html.escape(paper_title)}</div>
+{body_html}
+<div class="footer">Drafted by PeerMind Rebuttal Co-Pilot · Claude Opus 4.7</div>
+</div>
+</body></html>"""
+    return HTMLResponse(content=html_doc)
+
+
+def _md_inline(text: str) -> str:
+    """Very small subset of markdown inline formatting: escape HTML, then
+    turn **bold** into <strong>. No other inline rules — the rebuttal agent
+    output is plain prose with occasional bolding of R1.1 / concede tags."""
+    import html as _html
+    import re as _re
+
+    escaped = _html.escape(text)
+    return _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
 
 
 @app.get("/api/health")

@@ -41,6 +41,12 @@ class Job(Base):
     detected_rationale: Mapped[str | None] = mapped_column(String(600), default=None)
     detected_confidence: Mapped[float | None] = mapped_column(default=None)
 
+    # Cached Rebuttal Co-Pilot output — latest draft the user generated.
+    # Persisted so the panel survives reloads and the /rebuttal-letter
+    # export endpoint can produce a printable version without re-running
+    # the agent.
+    rebuttal_text: Mapped[str | None] = mapped_column(Text, default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -99,7 +105,21 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     return _sessionmaker
 
 
+async def _has_column(conn, table: str, column: str) -> bool:
+    rows = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+    for row in rows.fetchall():
+        if row[1] == column:
+            return True
+    return False
+
+
 async def init_db() -> None:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Lightweight idempotent migration for columns added after the
+        # initial schema was created. SQLAlchemy's create_all won't add
+        # columns to an existing table, and we'd rather not ask users to
+        # drop their local DB every time we extend Job.
+        if not await _has_column(conn, "jobs", "rebuttal_text"):
+            await conn.exec_driver_sql("ALTER TABLE jobs ADD COLUMN rebuttal_text TEXT")

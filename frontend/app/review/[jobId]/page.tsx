@@ -3,22 +3,20 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
-import { AlertTriangle, ChevronRight, Settings2 } from "lucide-react";
+import { ChevronRight, Settings2 } from "lucide-react";
 import { useJob } from "@/lib/store";
 import { applyAdhocPatch, streamUrl } from "@/lib/api";
 import { Logo } from "@/components/Logo";
 import { LaTeXEditor } from "@/components/LaTeXEditor";
 import { PDFPreview, type PDFPreviewHandle } from "@/components/PDFPreview";
-import { VerdictCard } from "@/components/VerdictCard";
-import { ActionPlan, type ActionPlanHandlers } from "@/components/ActionPlan";
-import { PatchQueue } from "@/components/PatchQueue";
+import {
+  ConversationRail,
+  type ConversationRailHandle,
+} from "@/components/ConversationRail";
+import { RailFooter } from "@/components/RailFooter";
+import { type ActionPlanHandlers } from "@/components/ActionPlan";
 import { AgentStatusPanel } from "@/components/AgentStatusPanel";
-import { ReviewerStream } from "@/components/ReviewerStream";
-import { AutoApplyToast } from "@/components/AutoApplyToast";
-import { ChatBar, type ChatBarHandle } from "@/components/ChatBar";
 import { useIsDark } from "@/components/ThemeToggle";
-import { useAutoApply } from "@/lib/useAutoApply";
 import type { ReviewEvent } from "@/lib/types";
 
 export default function WorkbenchPage() {
@@ -26,37 +24,32 @@ export default function WorkbenchPage() {
   const jobId = params.jobId;
   const store = useJob();
   const isDark = useIsDark();
-  const [patchMode, setPatchMode] = useState<"idle" | "one_by_one">("idle");
-  const [focusedPatchId, setFocusedPatchId] = useState<string | null>(null);
   const [focusLine, setFocusLine] = useState<number | null>(null);
   const [sourceOpen, setSourceOpen] = useState(false);
   const pdfRef = useRef<PDFPreviewHandle | null>(null);
-  const chatRef = useRef<ChatBarHandle | null>(null);
+  const railRef = useRef<ConversationRailHandle | null>(null);
   const [appliedActionIds, setAppliedActionIds] = useState<Set<string>>(new Set());
 
+  // Click-to-zoom: only scroll the PDF + flash the target page. We
+  // intentionally do NOT pop the source view anymore — the user stays
+  // focused on the paper, not the LaTeX. `focusLine` is still set so the
+  // source panel (if the user opens it) lands in the right place.
   const onZoomTo = (page?: number | null, line?: number | null) => {
     if (page && pdfRef.current) {
       pdfRef.current.scrollToPage(page, { flash: true });
     }
-    if (line) {
-      setSourceOpen(true);
-      setFocusLine(line);
-    }
+    if (line) setFocusLine(line);
   };
 
   const actionPlanHandlers: ActionPlanHandlers = {
     onZoomTo,
-    onSuggest: (item) => {
-      const prompt = `How should I address — "${item.title}"${
-        item.affected_claim ? `: ${item.affected_claim}` : ""
-      }? Draft a concrete revision plan.`;
-      chatRef.current?.prefill(prompt);
-    },
     onFixNow: async (item) => {
       if (!item.fix_hint) return;
       try {
-        setSourceOpen(true);
         if (item.tex_line_hint) setFocusLine(item.tex_line_hint);
+        if (item.page_hint && pdfRef.current) {
+          pdfRef.current.scrollToPage(item.page_hint, { flash: true });
+        }
         await applyAdhocPatch(jobId, {
           diff: item.fix_hint.diff,
           description: item.fix_hint.description || item.title,
@@ -69,14 +62,6 @@ export default function WorkbenchPage() {
       }
     },
   };
-
-  const autoApply = useAutoApply({
-    jobId,
-    onFocusLine: (line) => {
-      setSourceOpen(true);
-      setFocusLine(line);
-    },
-  });
 
   useEffect(() => {
     store.reset(jobId);
@@ -98,9 +83,11 @@ export default function WorkbenchPage() {
       ? store.rounds[store.currentRound].deltaFromPrev
       : undefined;
 
-  const latestPatch = store.patches.find((p) => p.status === "pending");
+  // Source editor focus pointer — still used by LaTeXEditor when the user
+  // explicitly opens the source rail. Falls back to the latest pending
+  // patch so the editor highlights it in context.
   const effectiveFocus =
-    patchMode === "one_by_one" ? focusedPatchId : latestPatch?.patch_id ?? null;
+    store.patches.find((p) => p.status === "pending")?.patch_id ?? null;
 
   const hasSource = Boolean(store.mainTex) && store.sourceType !== "pdf";
 
@@ -138,7 +125,7 @@ export default function WorkbenchPage() {
           <AgentStatusPanel />
         </aside>
 
-        {/* Center — PDF hero */}
+        {/* Center — PDF hero (takes the whole column now) */}
         <section className="min-h-0 flex flex-col">
           <div className="flex-1 min-h-0">
             <PDFPreview
@@ -150,21 +137,6 @@ export default function WorkbenchPage() {
               title={store.title}
             />
           </div>
-          {store.patches.length > 0 && (
-            <PatchQueue
-              jobId={jobId}
-              patches={store.patches}
-              mode={patchMode}
-              setMode={setPatchMode}
-              focusedPatchId={effectiveFocus}
-              setFocused={setFocusedPatchId}
-              onAutoApplyAll={() => {
-                setSourceOpen(true);
-                autoApply.run(store.patches);
-              }}
-              autoApplyActive={autoApply.state.active}
-            />
-          )}
         </section>
 
         {/* Right — verdict & action plan (or source when toggled) */}
@@ -187,64 +159,38 @@ export default function WorkbenchPage() {
           ) : (
             <VerdictRail
               jobId={jobId}
-              verdict={store.verdict}
-              actionPlan={store.actionPlan}
               critiqueDelta={currentDelta}
-              errors={store.errors}
               hasSource={hasSource}
               onOpenSource={() => setSourceOpen(true)}
               actionPlanHandlers={actionPlanHandlers}
               appliedActionIds={appliedActionIds}
+              railRef={railRef}
             />
           )}
         </aside>
       </div>
 
-      {/* Bottom bar */}
-      <ChatBar ref={chatRef} jobId={jobId} />
-
-      <AutoApplyToast
-        visible={autoApply.state.active}
-        index={autoApply.state.currentIndex}
-        total={autoApply.state.total}
-        description={autoApply.state.description}
-      />
     </div>
   );
 }
 
 function VerdictRail({
   jobId,
-  verdict,
-  actionPlan,
   critiqueDelta,
-  errors,
   hasSource,
   onOpenSource,
   actionPlanHandlers,
   appliedActionIds,
+  railRef,
 }: {
   jobId: string;
-  verdict: any;
-  actionPlan: any;
   critiqueDelta: number | undefined;
-  errors: string[];
   hasSource: boolean;
   onOpenSource: () => void;
   actionPlanHandlers: ActionPlanHandlers;
   appliedActionIds: Set<string>;
+  railRef: React.RefObject<ConversationRailHandle | null>;
 }) {
-  // Decorate each author_required item with local `applied: true` so the
-  // ActionPlan can grey it out + show the "applied" chip.
-  const decoratedPlan = actionPlan
-    ? {
-        ...actionPlan,
-        author_required: (actionPlan.author_required || []).map((a: any) => ({
-          ...a,
-          applied: appliedActionIds.has(a.id) || a.applied,
-        })),
-      }
-    : null;
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center px-[var(--space-4)] h-10 border-b border-[color:var(--color-border)]">
@@ -252,51 +198,25 @@ function VerdictRail({
           className="font-display font-semibold"
           style={{ fontSize: "var(--text-lg)", letterSpacing: "-0.01em" }}
         >
-          Verdict & action plan
+          Conversation
         </h2>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto scroll-pane space-y-[var(--space-5)]">
-        <div className="px-[var(--space-4)] pt-[var(--space-4)]">
-          <VerdictCard verdict={verdict} jobId={jobId} critiqueDelta={critiqueDelta} />
-        </div>
+      <ConversationRail
+        ref={railRef}
+        jobId={jobId}
+        critiqueDelta={critiqueDelta}
+        handlers={actionPlanHandlers}
+        appliedActionIds={appliedActionIds}
+      />
 
-        {!verdict && (
-          <>
-            <div className="tick-divider mx-[var(--space-4)]" />
-            <div>
-              <div className="px-[var(--space-4)] eyebrow mb-[var(--space-2)]">
-                Live reviewer critique
-              </div>
-              <div className="min-h-[400px]">
-                <ReviewerStream />
-              </div>
-            </div>
-          </>
-        )}
-
-        {verdict && (
-          <>
-            <div className="tick-divider mx-[var(--space-4)]" />
-            <div className="px-[var(--space-4)]">
-              <ActionPlan plan={decoratedPlan} handlers={actionPlanHandlers} />
-            </div>
-          </>
-        )}
-
-        {errors.length > 0 && (
-          <div className="px-[var(--space-4)]">
-            <WarningDetails errors={errors} />
-          </div>
-        )}
-        <div className="h-[var(--space-4)]" />
-      </div>
+      <RailFooter jobId={jobId} />
 
       {hasSource && (
-        <div className="border-t border-[color:var(--color-border)] px-[var(--space-4)] py-[var(--space-3)]">
+        <div className="border-t border-[color:var(--color-border)] px-[var(--space-4)] py-[var(--space-2)]">
           <button
             onClick={onOpenSource}
-            className="btn-ghost inline-flex items-center gap-1.5 text-[var(--text-sm)] w-full justify-center"
+            className="btn-ghost inline-flex items-center gap-1.5 text-[var(--text-xs)] w-full justify-center"
           >
             <span>Show source</span>
             <ChevronRight size={14} />
@@ -355,38 +275,3 @@ function SourceRail({
   );
 }
 
-function WarningDetails({ errors }: { errors: string[] }) {
-  return (
-    <details
-      className="rounded-[var(--radius-md)] border"
-      style={{
-        background: "var(--color-warning-bg)",
-        borderColor: "rgba(217,168,74,0.3)",
-      }}
-    >
-      <summary
-        className="flex items-center gap-2 px-[var(--space-3)] py-[var(--space-2)] cursor-pointer text-[var(--text-sm)]"
-        style={{ color: "var(--color-warning)" }}
-      >
-        <AlertTriangle size={14} />
-        <span>
-          {errors.length} warning{errors.length === 1 ? "" : "s"}
-        </span>
-        <span className="eyebrow ml-auto" style={{ color: "var(--color-warning)" }}>
-          click to expand
-        </span>
-      </summary>
-      <div className="px-[var(--space-3)] pb-[var(--space-3)] space-y-1">
-        {errors.slice(-5).map((e, i) => (
-          <pre
-            key={i}
-            className="text-[11px] font-mono whitespace-pre-wrap break-all"
-            style={{ color: "var(--color-warning)" }}
-          >
-            {e}
-          </pre>
-        ))}
-      </div>
-    </details>
-  );
-}

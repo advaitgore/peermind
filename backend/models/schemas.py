@@ -34,6 +34,14 @@ EventType = Literal[
     "patch_diffing",
     "patch_compiling",
     "patch_reloading",
+    # Synthesis extended-thinking trace — streamed token-by-token from
+    # Opus 4.7's thinking blocks so the user watches Claude reason.
+    "synthesis_thinking",
+    "synthesis_thinking_done",
+    # Rebuttal stream — the Rebuttal Co-Pilot streams its response live.
+    "rebuttal_started",
+    "rebuttal_token",
+    "rebuttal_complete",
     "compile_started",
     "compile_success",
     "compile_error",
@@ -178,6 +186,9 @@ class Verdict(BaseModel):
     consensus_issues: list[dict[str, Any]] = Field(default_factory=list)
     disagreements_arbitrated: list[dict[str, Any]] = Field(default_factory=list)
     scores_synthesis: dict[str, float] = Field(default_factory=dict)
+    # Probability (0-1) that the paper would be accepted at the target venue
+    # given the evidence — produced by Opus 4.7 with extended thinking.
+    acceptance_probability: float | None = None
 
 
 class ActionPlan(BaseModel):

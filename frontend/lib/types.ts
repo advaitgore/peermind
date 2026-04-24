@@ -20,6 +20,11 @@ export type EventType =
   | "patch_diffing"
   | "patch_compiling"
   | "patch_reloading"
+  | "synthesis_thinking"
+  | "synthesis_thinking_done"
+  | "rebuttal_started"
+  | "rebuttal_token"
+  | "rebuttal_complete"
   | "compile_started"
   | "compile_success"
   | "compile_error"
@@ -151,6 +156,7 @@ export interface Verdict {
     evidence?: string;
   }>;
   scores_synthesis?: Record<string, number>;
+  acceptance_probability?: number | null;
 }
 
 export interface ActionPlan {

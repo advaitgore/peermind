@@ -109,3 +109,21 @@ export function pdfUrl(jobId: string, version: string | number = "") {
 export function streamUrl(jobId: string) {
   return `${API_BASE}/jobs/${jobId}/stream`;
 }
+
+export async function startRebuttal(jobId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/rebuttal`, { method: "POST" });
+  if (!res.ok) throw new Error(`start_rebuttal: ${res.status}`);
+}
+
+export async function fetchExistingRebuttal(
+  jobId: string
+): Promise<{ text: string } | null> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}/rebuttal`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`get_rebuttal: ${res.status}`);
+  return res.json();
+}
+
+export function rebuttalLetterUrl(jobId: string) {
+  return `${BACKEND_BASE}/api/jobs/${jobId}/rebuttal-letter`;
+}

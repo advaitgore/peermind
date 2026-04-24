@@ -2,31 +2,20 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import {
-  Check,
-  ChevronRight,
-  MapPin,
-  MessageCircle,
-  Wand2,
-} from "lucide-react";
+import { Check, ChevronRight, MapPin, Wand2 } from "lucide-react";
 import type { ActionPlan as ActionPlanT, AuthorAction } from "@/lib/types";
 
-const SEVERITY_META: Record<
-  string,
-  { label: string; color: string; defaultFix: "fix_now" | "suggest" }
-> = {
-  critical: { label: "Critical", color: "var(--color-skeptic)", defaultFix: "suggest" },
-  major: { label: "Major", color: "var(--color-warning)", defaultFix: "suggest" },
-  minor: { label: "Minor", color: "var(--color-text-muted)", defaultFix: "fix_now" },
+const SEVERITY_META: Record<string, { label: string; color: string }> = {
+  critical: { label: "Critical", color: "var(--color-skeptic)" },
+  major: { label: "Major", color: "var(--color-warning)" },
+  minor: { label: "Minor", color: "var(--color-text-muted)" },
 };
 
 export interface ActionPlanHandlers {
-  /** Click the body of a row → zoom PDF + source. */
+  /** Click the body of a row → zoom PDF. */
   onZoomTo?: (page?: number | null, line?: number | null) => void;
-  /** Click the "Fix now" button → apply the fix_hint diff. */
+  /** Click the "Apply" button → apply the fix_hint diff. */
   onFixNow?: (item: AuthorAction) => Promise<void> | void;
-  /** Click the "Suggest a fix" button → pre-fill chat. */
-  onSuggest?: (item: AuthorAction) => void;
 }
 
 function Item({
@@ -40,7 +29,6 @@ function Item({
   const [fixing, setFixing] = useState(false);
   const meta = SEVERITY_META[item.severity] || SEVERITY_META.minor;
   const canFixNow = Boolean(item.fix_hint && item.fix_hint.diff);
-  const primaryAction = meta.defaultFix;
 
   const runFix = async () => {
     if (!handlers.onFixNow || !canFixNow) return;
@@ -93,7 +81,6 @@ function Item({
           </span>
         </button>
 
-        {/* Primary action button */}
         <div className="flex items-center gap-1 shrink-0">
           {item.applied ? (
             <span
@@ -103,38 +90,18 @@ function Item({
               <Check size={11} />
               applied
             </span>
-          ) : primaryAction === "fix_now" && canFixNow ? (
+          ) : canFixNow ? (
             <button
               onClick={runFix}
               disabled={fixing}
               className="btn btn-primary inline-flex items-center gap-1.5"
               style={{ padding: "4px 10px", fontSize: "var(--text-xs)" }}
+              title="Apply the suggested fix"
             >
               <Wand2 size={11} />
-              {fixing ? "fixing…" : "Fix now"}
+              {fixing ? "applying…" : "Apply"}
             </button>
-          ) : (
-            <button
-              onClick={() => handlers.onSuggest?.(item)}
-              className="btn inline-flex items-center gap-1.5"
-              style={{ padding: "4px 10px", fontSize: "var(--text-xs)" }}
-            >
-              <MessageCircle size={11} />
-              Suggest
-            </button>
-          )}
-          {/* Secondary ghost: the non-primary alternative when both are useful */}
-          {!item.applied && primaryAction === "suggest" && canFixNow && (
-            <button
-              onClick={runFix}
-              disabled={fixing}
-              className="btn-ghost inline-flex items-center gap-1"
-              title="Fix now — apply the suggested diff"
-              style={{ padding: "4px 6px", fontSize: "var(--text-xs)" }}
-            >
-              <Wand2 size={11} />
-            </button>
-          )}
+          ) : null}
           <button
             onClick={() => setOpen((v) => !v)}
             className="icon-btn"
