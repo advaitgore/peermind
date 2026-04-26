@@ -116,6 +116,7 @@ export interface AutoApplyPatch {
   diff: string;
   category: "citation" | "typo" | "notation" | "caption" | "phrasing";
   status?: "pending" | "applied" | "rejected" | "requires_manual_review";
+  page_hint?: number | null;
 }
 
 export interface FixHint {

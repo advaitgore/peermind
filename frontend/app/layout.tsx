@@ -1,5 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
+// Required when react-pdf's renderTextLayer=true — positions invisible text
+// spans over the canvas for selection/search without showing them visually.
+import "react-pdf/dist/esm/Page/TextLayer.css";
+import { ConsoleNoiseSuppressor } from "@/components/ConsoleNoiseSuppressor";
 
 export const metadata: Metadata = {
   title: "PeerMind — your paper's toughest reviewer",
@@ -10,7 +14,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="font-body">{children}</body>
+      <body className="font-body">
+        <ConsoleNoiseSuppressor />
+        {children}
+      </body>
     </html>
   );
 }

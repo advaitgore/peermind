@@ -21,11 +21,11 @@ def build_champion_spec(journal: dict[str, Any]) -> AgentSpec:
     system = render_prompt(skill.system_prompt_template, ctx)
     return AgentSpec(
         name=f"peermind-champion-{journal.get('id', 'unknown')}",
-        # Sonnet 4.5 matches skeptic — keeps reviewer latency under ~30s.
+        # Sonnet 4.5 matches skeptic. Budget sized for full prose + JSON tail.
         model="claude-sonnet-4-5",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
-        max_tokens=3072,
+        max_tokens=6144,
     )
 
 

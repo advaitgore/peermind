@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ChevronRight, Settings2 } from "lucide-react";
 import { useJob } from "@/lib/store";
-import { applyAdhocPatch, streamUrl } from "@/lib/api";
+import { applyAdhocPatch, applyPatch, streamUrl } from "@/lib/api";
 import { Logo } from "@/components/Logo";
 import { LaTeXEditor } from "@/components/LaTeXEditor";
 import { PDFPreview, type PDFPreviewHandle } from "@/components/PDFPreview";
@@ -43,22 +43,54 @@ export default function WorkbenchPage() {
 
   const actionPlanHandlers: ActionPlanHandlers = {
     onZoomTo,
+    onScrollToText: (query: string) => pdfRef.current?.scrollToText(query) ?? false,
     onFixNow: async (item) => {
-      if (!item.fix_hint) return;
+      // Don't scroll the PDF on apply — the user already navigated to
+      // the edit location during the walkthrough step (via scrollToText).
+      // Their viewport stays put through apply + recompile.
+      if (item.tex_line_hint) setFocusLine(item.tex_line_hint);
+
+      // Route by source: auto-apply patches already exist server-side as
+      // Patch rows, so we just POST their patch_id. Author-required items
+      // use the adhoc-apply endpoint which creates the row first.
+      const diff = item.diff ?? item.fix_hint?.diff;
+      const description =
+        item.description ?? item.fix_hint?.description ?? item.title;
+      const category =
+        item.category ?? item.fix_hint?.category ?? "phrasing";
+
+      if (!diff && !(item.source === "auto" && item.patch_id)) {
+        return;
+      }
+
+      // Park the active fix in the store so the floating PDF live-edit
+      // card can render the diff with a typewriter animation while the
+      // server works. Cleared by compile_success / compile_error.
+      useJob.setState({
+        activeFix: {
+          id: item.patch_id || item.id,
+          title: item.title,
+          diff: diff || "",
+          page_hint: item.page_hint ?? null,
+        },
+        activeFixState: "applying",
+      });
+
       try {
-        if (item.tex_line_hint) setFocusLine(item.tex_line_hint);
-        if (item.page_hint && pdfRef.current) {
-          pdfRef.current.scrollToPage(item.page_hint, { flash: true });
+        if (item.source === "auto" && item.patch_id) {
+          await applyPatch(jobId, item.patch_id);
+        } else if (diff) {
+          await applyAdhocPatch(jobId, {
+            diff,
+            description,
+            category,
+            source_action_id: item.id,
+          });
         }
-        await applyAdhocPatch(jobId, {
-          diff: item.fix_hint.diff,
-          description: item.fix_hint.description || item.title,
-          category: item.fix_hint.category || "phrasing",
-          source_action_id: item.id,
-        });
         setAppliedActionIds((prev) => new Set(prev).add(item.id));
       } catch (e) {
         console.error("onFixNow failed", e);
+        useJob.setState({ activeFix: null, activeFixState: null });
       }
     },
   };
@@ -135,6 +167,7 @@ export default function WorkbenchPage() {
               compiling={store.pdfCompiling}
               error={store.lastCompileError}
               title={store.title}
+              postSwapPage={store.activeFix?.page_hint ?? null}
             />
           </div>
         </section>

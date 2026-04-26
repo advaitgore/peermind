@@ -13,12 +13,13 @@ import type { ReactNode } from "react";
 import { ArrowUp, ChevronDown, ChevronRight } from "lucide-react";
 import { useJob } from "@/lib/store";
 import type { ChatTurn } from "@/lib/store";
+import { stripLatex } from "@/lib/latex";
 import { Logo } from "./Logo";
 import { VerdictCard } from "./VerdictCard";
 import { ReasoningTrace } from "./ReasoningTrace";
 import { RebuttalPanel } from "./RebuttalPanel";
-import { GuidedActionPlan } from "./GuidedActionPlan";
-import { ActionPlan, type ActionPlanHandlers } from "./ActionPlan";
+import { GuidedActionPlan, type GuideItem } from "./GuidedActionPlan";
+import { type ActionPlanHandlers } from "./ActionPlan";
 
 export interface ConversationRailHandle {
   sendFromOutside: (text: string) => void;
@@ -328,11 +329,17 @@ function ReviewerDetails({
   }, [streaming]);
 
   if (!rnd) return null;
+
+  // We used to hide the dropdown entirely until tokens landed, but that
+  // caused the reading bubble to look inert while the reviewer was busy
+  // thinking. Always render — show a "Waiting for first tokens…" body
+  // when we have nothing yet.
   const hasAnything = streamedText.length > 0 || Boolean(review);
-  if (!hasAnything) return null;
 
   const label = streaming
-    ? "Hide live stream"
+    ? open
+      ? "Hide live stream"
+      : "Show live stream"
     : review
     ? open
       ? "Hide details"
@@ -360,14 +367,17 @@ function ReviewerDetails({
             className="overflow-hidden"
           >
             <div className="mt-2 space-y-2">
-              {review ? (
+              {review &&
+              ((review.weaknesses?.length ?? 0) > 0 ||
+                (review.strengths?.length ?? 0) > 0 ||
+                review.summary) ? (
                 <>
                   {review.summary && (
                     <div
                       className="text-[var(--text-sm)] leading-relaxed"
                       style={{ color: "var(--color-text-muted)" }}
                     >
-                      {review.summary}
+                      {stripLatex(review.summary)}
                     </div>
                   )}
                   {review.weaknesses && review.weaknesses.length > 0 && (
@@ -395,7 +405,7 @@ function ReviewerDetails({
                                     : "var(--color-text-faint)",
                               }}
                             />
-                            <span>{w.issue}</span>
+                            <span>{stripLatex(w.issue || "")}</span>
                           </li>
                         ))}
                       </ul>
@@ -416,7 +426,7 @@ function ReviewerDetails({
                             className="text-[var(--text-sm)] leading-snug"
                             style={{ color: "var(--color-text-muted)" }}
                           >
-                            {s}
+                            {stripLatex(s || "")}
                           </li>
                         ))}
                       </ul>
@@ -435,8 +445,14 @@ function ReviewerDetails({
                     padding: "var(--space-2)",
                   }}
                 >
-                  {streamedText || " "}
-                  {streaming && (
+                  {hasAnything ? (
+                    streamedText || " "
+                  ) : (
+                    <span style={{ color: "var(--color-text-faint)" }}>
+                      Waiting for first tokens…
+                    </span>
+                  )}
+                  {(!hasAnything || streaming) && (
                     <motion.span
                       animate={{ opacity: [1, 0, 1] }}
                       transition={{ duration: 0.8, repeat: Infinity }}
@@ -519,7 +535,7 @@ function ScoutDetails({ inFlight }: { inFlight?: boolean }) {
                           }}
                           style={{ background: "var(--color-primary-strong)" }}
                         />
-                        <span>{c}</span>
+                        <span>{stripLatex(c)}</span>
                       </li>
                     ))}
                   </ul>
@@ -554,7 +570,7 @@ function ScoutDetails({ inFlight }: { inFlight?: boolean }) {
                             />
                             <span>
                               <span style={{ color: "var(--color-text-muted)" }}>
-                                {f.claim}
+                                {stripLatex(f.claim || "")}
                               </span>
                               {paper && (
                                 <>
@@ -566,7 +582,7 @@ function ScoutDetails({ inFlight }: { inFlight?: boolean }) {
                                       color: "var(--color-text-faint)",
                                     }}
                                   >
-                                    {paper.title || paper.id || "(paper)"}
+                                    {stripLatex(paper.title || paper.id || "(paper)")}
                                     {paper.year ? ` · ${paper.year}` : ""}
                                     {paper.citationCount
                                       ? ` · ${paper.citationCount} citations`
@@ -737,6 +753,47 @@ function CodeDetails({ inFlight }: { inFlight?: boolean }) {
   );
 }
 
+/**
+ * Build a "Reviewer N is done" message. Keep the one-liner compact; the
+ * dropdown carries the detail and falls back to raw prose if the
+ * structured sections came back empty.
+ */
+function reviewerDoneMessage({
+  who,
+  review,
+  round,
+  which,
+  key,
+}: {
+  who: string;
+  review: import("@/lib/types").ReviewerOutput;
+  streamed: string;
+  round: number;
+  which: "skeptic" | "champion";
+  key: string;
+}): Message {
+  const wCount = review.weaknesses?.length ?? 0;
+  const sCount = review.strengths?.length ?? 0;
+  const rec = review.recommendation && review.recommendation.trim();
+  return {
+    key,
+    body: (
+      <>
+        <strong>{who}</strong> flagged <strong>{wCount}</strong> weakness
+        {wCount === 1 ? "" : "es"} and {sCount} strength
+        {sCount === 1 ? "" : "s"}.
+        {rec && (
+          <>
+            {" "}
+            Recommendation: <em>{prettyRec(rec)}</em>.
+          </>
+        )}
+        <ReviewerDetails round={round} which={which} defaultOpen={false} />
+      </>
+    ),
+  };
+}
+
 function buildMessages(
   store: ReturnType<typeof useJob.getState>,
   handlers: ActionPlanHandlers,
@@ -780,8 +837,9 @@ function buildMessages(
   const championStreaming = Boolean(round?.championText) && !championDone;
   const anyRoundStarted = store.currentRound >= 1;
 
-  // One streaming bubble per reviewer while they're mid-stream. The
-  // dropdown inside each lets the user watch the live tokens.
+  // One streaming bubble per reviewer while they're mid-stream. The dropdown
+  // always renders (even before the first token lands) so the user has
+  // somewhere to watch from as soon as output starts.
   if (anyRoundStarted && !skepticDone) {
     out.push({
       key: "reviewer1-reading",
@@ -789,11 +847,8 @@ function buildMessages(
       body: (
         <>
           <strong style={{ color: "var(--color-skeptic)" }}>Reviewer 1</strong>{" "}
-          is reading the paper now
-          {skepticStreaming ? " — open the dropdown to watch live." : "."}
-          {skepticStreaming && (
-            <ReviewerDetails round={currentRound} which="skeptic" defaultOpen />
-          )}
+          is reading the paper now — open the dropdown to watch live.
+          <ReviewerDetails round={currentRound} which="skeptic" defaultOpen />
         </>
       ),
     });
@@ -805,11 +860,8 @@ function buildMessages(
       body: (
         <>
           <strong style={{ color: "var(--color-champion)" }}>Reviewer 2</strong>{" "}
-          is reading the paper now
-          {championStreaming ? " — open the dropdown to watch live." : "."}
-          {championStreaming && (
-            <ReviewerDetails round={currentRound} which="champion" defaultOpen />
-          )}
+          is reading the paper now — open the dropdown to watch live.
+          <ReviewerDetails round={currentRound} which="champion" defaultOpen />
         </>
       ),
     });
@@ -841,36 +893,28 @@ function buildMessages(
   }
 
   if (skepticDone && round?.skepticReview) {
-    const r = round.skepticReview;
-    out.push({
-      key: "reviewer1-done",
-      body: (
-        <>
-          <strong>Reviewer 1</strong> flagged{" "}
-          <strong>{r.weaknesses.length}</strong> weakness
-          {r.weaknesses.length === 1 ? "" : "es"} and {r.strengths.length}{" "}
-          strength{r.strengths.length === 1 ? "" : "s"}. Recommendation:{" "}
-          <em>{prettyRec(r.recommendation)}</em>.
-          <ReviewerDetails round={currentRound} which="skeptic" defaultOpen={false} />
-        </>
-      ),
-    });
+    out.push(
+      reviewerDoneMessage({
+        who: "Reviewer 1",
+        review: round.skepticReview,
+        streamed: round.skepticText || "",
+        round: currentRound,
+        which: "skeptic",
+        key: "reviewer1-done",
+      })
+    );
   }
   if (championDone && round?.championReview) {
-    const r = round.championReview;
-    out.push({
-      key: "reviewer2-done",
-      body: (
-        <>
-          <strong>Reviewer 2</strong> flagged{" "}
-          <strong>{r.weaknesses.length}</strong> weakness
-          {r.weaknesses.length === 1 ? "" : "es"} and {r.strengths.length}{" "}
-          strength{r.strengths.length === 1 ? "" : "s"}. Recommendation:{" "}
-          <em>{prettyRec(r.recommendation)}</em>.
-          <ReviewerDetails round={currentRound} which="champion" defaultOpen={false} />
-        </>
-      ),
-    });
+    out.push(
+      reviewerDoneMessage({
+        who: "Reviewer 2",
+        review: round.championReview,
+        streamed: round.championText || "",
+        round: currentRound,
+        which: "champion",
+        key: "reviewer2-done",
+      })
+    );
   }
 
   if (
@@ -924,8 +968,8 @@ function buildMessages(
       pending: true,
       body: (
         <>
-          Putting it all together — <strong>Opus 4.7</strong> is synthesizing
-          the verdict with extended thinking. This usually takes 20-40 seconds.
+          Putting it all together — synthesizing the verdict with extended
+          thinking. This usually takes 20-40 seconds.
         </>
       ),
     });
@@ -978,79 +1022,164 @@ function buildMessages(
     });
   }
 
-  const authorRequired = store.actionPlan?.author_required ?? [];
-  if (store.actionPlan && authorRequired.length > 0) {
+  // Build a single unified walkthrough list that merges author_required
+  // items with auto_apply_patches. Author items come first (usually more
+  // severe); auto patches are surfaced as individual "apply?" steps.
+  const guideItems: GuideItem[] = [];
+  for (const a of store.actionPlan?.author_required ?? []) {
+    guideItems.push({
+      id: a.id,
+      title: a.title,
+      severity: a.severity,
+      source: "author",
+      diff: a.fix_hint?.diff,
+      description: a.fix_hint?.description,
+      category: a.fix_hint?.category,
+      claim: a.affected_claim,
+      evidence: a.evidence,
+      suggested_action: a.suggested_action,
+      page_hint: a.page_hint ?? null,
+      tex_line_hint: a.tex_line_hint ?? null,
+      applied: appliedActionIds.has(a.id) || Boolean(a.applied),
+    });
+  }
+  for (const p of store.patches) {
+    guideItems.push({
+      id: p.patch_id,
+      title: p.description || "Surface-level fix",
+      severity: "minor",
+      source: "auto",
+      diff: p.diff,
+      description: p.description,
+      category: p.category,
+      page_hint: p.page_hint ?? null,
+      tex_line_hint: null,
+      patch_id: p.patch_id,
+      applied: p.status === "applied",
+    });
+  }
+
+  if (store.actionPlan && guideItems.length > 0) {
+    const autoCount = guideItems.filter((g) => g.source === "auto").length;
+    const authorCount = guideItems.filter((g) => g.source === "author").length;
+
     if (store.guideMode === "pending") {
       out.push({
         key: "walkthrough-intro",
         body: (
           <div className="space-y-[var(--space-3)]">
             <div>
-              There {authorRequired.length === 1 ? "is" : "are"}{" "}
-              <strong>{authorRequired.length}</strong> issue
-              {authorRequired.length === 1 ? "" : "s"} you need to look at. Want
-              me to walk you through them one by one?
+              I found <strong>{guideItems.length}</strong> issue
+              {guideItems.length === 1 ? "" : "s"} in your paper
+              {autoCount > 0 || authorCount > 0 ? ":" : "."}
             </div>
+            {(autoCount > 0 || authorCount > 0) && (
+              <ul
+                className="space-y-1 text-[var(--text-sm)]"
+                style={{ color: "var(--color-text-muted)" }}
+              >
+                {authorCount > 0 && (
+                  <li>
+                    <strong>{authorCount}</strong> that need your judgment
+                    (experiments, rewrites)
+                  </li>
+                )}
+                {autoCount > 0 && (
+                  <li>
+                    <strong>{autoCount}</strong> I can patch automatically
+                    (typos, hedges, citations)
+                  </li>
+                )}
+              </ul>
+            )}
+            <div>Want me to walk you through them one by one?</div>
             <div className="flex flex-wrap gap-1.5">
               <button
                 onClick={() => useJob.getState().setGuideMode("step")}
-                className="btn btn-primary"
+                className="btn btn-primary inline-flex items-center gap-1.5"
                 style={{ padding: "5px 12px", fontSize: "var(--text-xs)" }}
               >
-                Yes, let's go
+                Let's go →
               </button>
               <button
                 onClick={() => useJob.getState().setGuideMode("list")}
                 className="btn"
                 style={{ padding: "5px 12px", fontSize: "var(--text-xs)" }}
               >
-                Show them as a list
+                Show me the list first
               </button>
             </div>
           </div>
         ),
       });
     } else if (store.guideMode === "step") {
-      const idx = Math.min(store.guideStep, authorRequired.length - 1);
-      const current = authorRequired[idx];
-      const applied =
-        appliedActionIds.has(current.id) || Boolean(current.applied);
+      const idx = Math.min(store.guideStep, guideItems.length - 1);
+      const current = guideItems[idx];
       out.push({
         key: `guide-step-${current.id}`,
         body: (
           <GuidedActionPlan
             item={current}
             index={idx}
-            total={authorRequired.length}
-            applied={applied}
+            total={guideItems.length}
             handlers={handlers}
-            onAdvance={() => useJob.getState().advanceGuide()}
+            onAdvance={() =>
+              useJob.getState().advanceGuide(guideItems.length)
+            }
             onShowList={() => useJob.getState().setGuideMode("list")}
           />
         ),
       });
     } else if (store.guideMode === "list") {
-      const decoratedPlan = {
-        ...store.actionPlan,
-        author_required: authorRequired.map((a) => ({
-          ...a,
-          applied: appliedActionIds.has(a.id) || a.applied,
-        })),
-      };
       out.push({
         key: "walkthrough-list",
         body: (
-          <div className="space-y-[var(--space-2)]">
-            <div>
-              Here's the full list — tackle them in whatever order works for you.
-            </div>
-            <ActionPlan plan={decoratedPlan} handlers={handlers} />
-            <div className="pt-1">
+          <div className="space-y-[var(--space-3)]">
+            <div>Here's the full list — tackle them in any order.</div>
+            <ul className="space-y-1.5">
+              {guideItems.map((g, i) => (
+                <li
+                  key={g.id}
+                  className="flex items-start gap-2 text-[var(--text-sm)]"
+                >
+                  <span
+                    className="mt-1.5 shrink-0 w-1 h-1 rounded-full"
+                    style={{
+                      background:
+                        g.severity === "critical"
+                          ? "var(--color-skeptic)"
+                          : g.severity === "major"
+                          ? "var(--color-warning)"
+                          : "var(--color-text-muted)",
+                    }}
+                  />
+                  <span className="flex-1 min-w-0" style={{ color: "var(--color-text)" }}>
+                    <span style={{ color: "var(--color-text-faint)" }}>
+                      {i + 1}.
+                    </span>{" "}
+                    {g.title}
+                    {g.applied && (
+                      <span
+                        className="ml-2 font-mono"
+                        style={{
+                          fontSize: "10px",
+                          color: "var(--color-champion)",
+                        }}
+                      >
+                        ✓ applied
+                      </span>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex flex-wrap gap-1.5 pt-1">
               <button
                 onClick={() => useJob.getState().setGuideMode("step")}
-                className="btn-ghost text-[var(--text-xs)]"
+                className="btn btn-primary"
+                style={{ padding: "5px 12px", fontSize: "var(--text-xs)" }}
               >
-                Walk me through them instead
+                Walk through now →
               </button>
             </div>
           </div>
@@ -1062,8 +1191,10 @@ function buildMessages(
         body: (
           <div className="space-y-[var(--space-2)]">
             <div>
-              That's everything. You can download the edited project zip, grab
-              a full review letter, or draft a rebuttal from the footer below.
+              That's all <strong>{guideItems.length}</strong> issue
+              {guideItems.length === 1 ? "" : "s"}. The project zip, review
+              letter, and rebuttal drafter are in the footer below — I'm here
+              in chat if you want to dig into anything.
             </div>
             <button
               onClick={() => useJob.getState().setGuideMode("list")}

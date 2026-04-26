@@ -11,11 +11,30 @@ const SEVERITY_META: Record<string, { label: string; color: string }> = {
   minor: { label: "Minor", color: "var(--color-text-muted)" },
 };
 
+/** Minimal shape accepted by onFixNow. Compatible with both legacy
+ *  AuthorAction items (nested `fix_hint`) and the unified GuideItem
+ *  (flattened `diff`/`description`/`category` + `source`). */
+export interface FixableItem {
+  id: string;
+  title: string;
+  source?: "auto" | "author";
+  patch_id?: string;
+  diff?: string;
+  description?: string;
+  category?: string;
+  page_hint?: number | null;
+  tex_line_hint?: number | null;
+  fix_hint?: { diff: string; description?: string; category?: string } | null;
+}
+
 export interface ActionPlanHandlers {
-  /** Click the body of a row → zoom PDF. */
+  /** Click the body of a row → zoom PDF via page_hint. */
   onZoomTo?: (page?: number | null, line?: number | null) => void;
-  /** Click the "Apply" button → apply the fix_hint diff. */
-  onFixNow?: (item: AuthorAction) => Promise<void> | void;
+  /** Click the "Apply" button → apply the diff. */
+  onFixNow?: (item: FixableItem) => Promise<void> | void;
+  /** Search the PDF text layer for a section reference (e.g., "5.4") and
+   *  scroll to the page that contains it. Returns true on success. */
+  onScrollToText?: (query: string) => boolean;
 }
 
 function Item({

@@ -280,7 +280,7 @@ export default function Landing() {
                       className="inline-block w-1.5 h-1.5 rounded-full animate-pulse"
                       style={{ background: "var(--color-primary)" }}
                     />
-                    classifying venue with Haiku 4.5…
+                    classifying venue…
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -348,7 +348,7 @@ export default function Landing() {
           </div>
 
           <div className="mt-5 text-center eyebrow text-[color:var(--color-text-faint)]">
-            Built on Claude Opus 4.7 · Haiku 4.5 · Managed Agents · MCP
+            Built on Claude · Managed Agents · MCP
           </div>
         </motion.div>
       </main>

@@ -71,14 +71,26 @@ Prompt caching is applied to the paper-context blobs in the chat and rebuttal en
 ## Features
 
 - **Venue-aware review.** Six built-in rubrics (NeurIPS, ICML, ICLR, Nature, Science, arXiv) + a custom venue option. Haiku 4.5 suggests the venue at upload; user confirms.
-- **Conversation rail.** The right rail narrates the pipeline in PeerMind's voice: a greeting on arrival, per-reviewer streaming bubbles with live-token dropdowns, Scout + Code Runner dropdowns showing the exact claims being searched / blocks being executed, an extended-thinking reasoning trace, the verdict card with acceptance-probability bar, and a guided walkthrough.
-- **Guided fix walkthrough.** One issue at a time. For a minor item with a concrete prose fix, PeerMind asks *"Would you like me to make this change?"* — Yes applies the diff, flashes the target page in the PDF, and auto-advances to the next issue. For critical items it shows the concern + recommended author action and lets you skip.
-- **Live LaTeX round-trip.** `unidiff` applies patches to the source on disk, `latexmk` recompiles inside a `texlive/texlive` Docker container (with a `.peermind-bak` rollback snapshot), the PDF re-renders in the react-pdf viewer via a cache-busting version token.
+- **Conversation rail.** The right rail narrates the pipeline in PeerMind's voice: a greeting on arrival, per-reviewer streaming bubbles with live-token dropdowns, Scout + Code Runner dropdowns showing the exact claims being searched / blocks being executed, an extended-thinking reasoning trace, the verdict card with acceptance-probability bar, and a guided walkthrough. LaTeX commands in displayed text are stripped client-side so the conversation reads as plain prose (`S\&P 500` → `S&P 500`, `2003--2023` → `2003–2023`, `\cite{...}` → `[ref]`).
+- **Guided fix walkthrough.** One issue at a time. For a minor item with a concrete prose fix, PeerMind asks *"Would you like me to make this change?"* — Yes applies the diff in place (no scroll yank) and runs a 4-step live-edit timeline (Locating → Applying → Recompiling → Reloading). For critical items it shows the concern + recommended author action and lets you skip.
+- **Section-aware PDF navigation.** When an issue references "Section 5.4" or "Table 3", the PDF navigates by searching the text layer for the actual heading — not by guessing a page number from line ratios. A two-pass search skips Table-of-Contents pages (dot-leader detection) and then scrolls to the exact span position within the page (not the page top), so the section heading lands at the top of the viewport.
+- **Live LaTeX round-trip with no-flash recompile.** `unidiff` applies patches to the source on disk, `latexmk` recompiles inside a `texlive/texlive` Docker container (with a `.peermind-bak` rollback snapshot). The PDF viewer uses a **double-buffered** `<Document>` — the new version loads in a hidden staging layer first, then cross-fades smoothly into view with the user's scroll position preserved. No blank flash.
+- **Live-edit card with typewriter.** While a patch applies, a floating teal card on the PDF types out the new line character-by-character. After `compile_success`, the card transitions to a settled "✓ Edit applied" state showing the full before/after diff. The edited page gets a soft teal left-border strip with hover-to-show-diff that persists for 8 seconds.
 - **Acceptance-probability meter.** Calibrated 0-1 estimate from Opus 4.7's synthesis — separate from "confidence." Visualized as a horizontal bar (red/amber/green).
 - **Rebuttal Co-Pilot.** Streams a venue-style author response classifying each reviewer concern as *concede*, *clarify*, or *refute*. Copy to clipboard, open as a printable HTML letter, or re-draft.
 - **Overleaf round-trip zip.** `GET /api/jobs/{id}/export.zip` walks the (post-patch) source directory, skips latexmk artefacts + backup snapshots, includes the final compiled PDF, and drops a `PEERMIND_REPORT.md` at the root. Unzip → Overleaf → New Project → Upload Project → compiles with zero manual fixup.
 - **Review letter export.** Printable HTML version of the full review (verdict, consensus issues, arbitrated disagreements, action plan, applied patches). Ctrl+P → Save as PDF.
 - **Three custom MCP servers.** `literature_search` (Semantic Scholar + arXiv), `latex_tools` (compile, diff-apply), and `semantic_scholar`. Shared implementations between the Managed Agent tools and the standalone MCP binaries.
+
+## How the apply flow works (end-to-end)
+
+A typical "Yes, apply it" click traces through these layers:
+
+1. **Frontend** — `onFixNow` in `app/review/[jobId]/page.tsx` parks the diff in zustand (`activeFix`, `activeFixState: "applying"`), routes to `applyPatch(patchId)` for auto-patches or `applyAdhocPatch(...)` for author-required items, and **does not move the PDF** (the user's already at the section from the walkthrough's earlier `scrollToText`).
+2. **Backend** — `POST /api/jobs/{id}/patch/apply` (or `/adhoc-apply`) calls `_apply_patch_and_recompile` in `backend/main.py`, which fires a 4-event narrated timeline: `patch_locating` → `patch_diffing` → `patch_compiling` → `patch_reloading`. On context-mismatch (diff doesn't match current source) it fires `compile_error` so the UI shows a red ✗ Retry state instead of stalling.
+3. **PDF page hints** — `orchestrator.py::_run_fix_agent` post-processes Fix Agent output: it counts the compiled PDF's pages with `pypdf`, parses each diff's `@@ -L,...` hunk header, and computes `page_hint = round(L / total_source_lines × pdf_page_count)`. Replaces Fix Agent's hand-wavy page guesses with a value derived from the actual diff position.
+4. **Frontend swap** — `compile_success` bumps `pdfVersion`. `PDFPreview` mounts the new URL in a hidden staging `<Document>`. When the staging's first page renders, an opacity cross-fade (260 ms) promotes it. The user's `scrollTop` is captured before swap and restored after — so they remain at the same section. An 8-second watchdog force-promotes if react-pdf hits a transient `InvalidPDFException`.
+5. **Hover overlay** — when `activeFixState === "applied"`, a `<PageEditHighlight>` is rendered as a child of the edited page's `motion.div`. Its `absolute inset-0` is always positioned correctly relative to the page (no offsetTop math). Hovering the page reveals the settled diff card to the right.
 
 ## Quickstart
 
@@ -124,7 +136,7 @@ python -m backend.mcp_servers.latex_tools.server        # stdio MCP server
 | Layer | Pieces |
 |---|---|
 | Agents | `anthropic` SDK 0.96.0 — `client.beta.agents`, `client.beta.environments`, `client.beta.sessions` (Managed Agents beta `managed-agents-2026-04-01`) |
-| Backend | FastAPI (async), SQLAlchemy + aiosqlite, sse-starlette, `unidiff`, kreuzberg for PDF text extraction |
+| Backend | FastAPI (async), SQLAlchemy + aiosqlite, sse-starlette, `unidiff`, kreuzberg for PDF text extraction, `pypdf` for compiled-page counting |
 | MCP | Official Python MCP SDK — 3 custom stdio servers; shared tool implementations with the in-process agent tools |
 | Frontend | Next.js 15 (App Router) + TypeScript, Tailwind v4, Zustand, Framer Motion, react-pdf, Monaco Editor |
 | Compile sandbox | `texlive/texlive` Docker image, `latexmk -shell-escape -f -bibtex`, 60 s timeout, auto-rollback on failure |
@@ -142,9 +154,15 @@ backend/
   main.py                # FastAPI endpoints, SSE stream, zip export, review letter
 frontend/
   app/review/[jobId]/    # workbench page
-  components/            # ConversationRail, GuidedActionPlan, VerdictCard, ReasoningTrace,
-                         # RebuttalPanel, RailFooter, PDFPreview, LaTeXEditor, etc.
-  lib/                   # Zustand store, SSE ingestion, API client
+  components/            # ConversationRail (narrator + guide), GuidedActionPlan,
+                         # PDFPreview (double-buffered, text-layer search),
+                         # PDFLiveEditCard (typewriter + settled diff),
+                         # VerdictCard, ReasoningTrace, RebuttalPanel,
+                         # RailFooter, LaTeXEditor, ConsoleNoiseSuppressor
+  lib/
+    store.ts             # Zustand store + SSE ingest
+    api.ts               # backend client
+    latex.ts             # stripLatex() display helper
 docker/                  # compile-sandbox Dockerfile + compose
 ```
 

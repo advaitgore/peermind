@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, APIStatusError
 
 from ..config import get_settings
 

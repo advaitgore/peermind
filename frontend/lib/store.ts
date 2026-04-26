@@ -119,6 +119,20 @@ export interface JobState {
     detail?: string;
   } | null;
 
+  /** Active fix being applied right now — used to render the floating
+   *  PDF live-edit card with the actual diff text. Set by the workbench
+   *  page's onFixNow before the API call; cleared on compile success or
+   *  error. null when nothing is applying. */
+  activeFix: {
+    id: string;
+    title: string;
+    diff: string;
+    page_hint?: number | null;
+  } | null;
+  /** "applying" while the patch is in flight; "applied" after compile_success
+   *  (card settles into the diff view); null once the card has been dismissed. */
+  activeFixState: "applying" | "applied" | null;
+
   agents: Record<AgentId, AgentState>;
 
   /**
@@ -141,7 +155,7 @@ interface Actions {
   optimisticallyApply: (patchId: string) => void;
   optimisticallyReject: (patchId: string) => void;
   setGuideMode: (mode: JobState["guideMode"]) => void;
-  advanceGuide: () => void;
+  advanceGuide: (total: number) => void;
   loadChatHistory: (jobId: string) => Promise<void>;
   sendChat: (jobId: string, text: string) => Promise<void>;
 }
@@ -175,6 +189,8 @@ const INITIAL: Omit<JobState, "jobId"> = {
   pdfCompiling: false,
   lastCompileError: null,
   applyProgress: null,
+  activeFix: null,
+  activeFixState: null,
   agents: { ...INITIAL_AGENTS },
   lastSeq: 0,
   complete: false,
@@ -221,9 +237,8 @@ export const useJob = create<JobState & Actions>((set, get) => ({
     set(() => ({ guideMode: mode, guideStep: 0 }));
   },
 
-  advanceGuide() {
+  advanceGuide(total: number) {
     set((s) => {
-      const total = s.actionPlan?.author_required?.length ?? 0;
       const next = s.guideStep + 1;
       if (next >= total) {
         return { guideStep: next, guideMode: "done" };
@@ -479,6 +494,10 @@ export const useJob = create<JobState & Actions>((set, get) => ({
           const rnd = { ...ensureRound(state, r) };
           rnd.converged = !!(ev.data as { converged?: boolean }).converged;
           state.rounds[r] = rnd;
+          // Synthesis + Fix Agent kick off in parallel immediately after
+          // round_complete — reflect that in the sidebar so the Fix Agent
+          // doesn't stay IDLE while it's actually running.
+          setAgent("fix_agent", "running");
           return state;
         }
         case "synthesis_thinking": {
@@ -540,6 +559,7 @@ export const useJob = create<JobState & Actions>((set, get) => ({
             description: string;
             category: AutoApplyPatch["category"];
             diff: string;
+            page_hint?: number | null;
           };
           state.patches = [
             ...s.patches,
@@ -549,6 +569,7 @@ export const useJob = create<JobState & Actions>((set, get) => ({
               category: d.category,
               diff: d.diff,
               status: "pending",
+              page_hint: d.page_hint ?? null,
             },
           ];
           return state;
@@ -567,9 +588,14 @@ export const useJob = create<JobState & Actions>((set, get) => ({
           state.pdfCompiling = false;
           state.pdfVersion = s.pdfVersion + 1;
           state.lastCompileError = null;
-          // Close the apply sub-timeline shortly after reloading.
           if (state.applyProgress) {
             state.applyProgress = { ...state.applyProgress, step: "done" };
+          }
+          // Transition the card to "applied" so it shows the settled diff
+          // view. activeFix itself stays until PDFPreview's jumpToPage uses
+          // it for the post-swap scroll, then clears it with an 8s delay.
+          if (state.activeFix) {
+            state.activeFixState = "applied";
           }
           return state;
         }
@@ -577,6 +603,8 @@ export const useJob = create<JobState & Actions>((set, get) => ({
           state.pdfCompiling = false;
           state.lastCompileError = (ev.data as { log?: string }).log ?? "compile failed";
           state.applyProgress = null;
+          state.activeFix = null;
+          state.activeFixState = null;
           return state;
         }
         case "patch_locating": {

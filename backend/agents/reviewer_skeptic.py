@@ -27,8 +27,10 @@ def build_skeptic_spec(journal: dict[str, Any]) -> AgentSpec:
         model="claude-sonnet-4-5",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
-        # Keep the budget tight — reviewer JSON + prose fit in 3k comfortably.
-        max_tokens=3072,
+        # Budget must fit full prose + the ===PEERMIND_JSON=== tail block.
+        # 3072 was cutting off mid-sentinel and leaving extract_json
+        # returning None; 6144 is what shipped the first working version.
+        max_tokens=6144,
     )
 
 

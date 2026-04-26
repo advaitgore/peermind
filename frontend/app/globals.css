@@ -20,9 +20,9 @@
   --color-border-strong: rgba(255, 255, 255, 0.115);
   --color-border-accent: rgba(79, 152, 163, 0.35);
 
-  --color-text: #edebe5;
-  --color-text-muted: #8e8c84;
-  --color-text-faint: #57564f;
+  --color-text: #ffffff;
+  --color-text-muted: #c0c0b8;
+  --color-text-faint: #9e9e94;
 
   /* Teal signal. Reserved for live state, CTAs, active selection. */
   --color-primary: #4f98a3;

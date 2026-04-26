@@ -3,6 +3,7 @@
 import { motion } from "framer-motion";
 import type { Verdict } from "@/lib/types";
 import { TrendingUp } from "lucide-react";
+import { stripLatex } from "@/lib/latex";
 
 function prettyRec(r: string | undefined) {
   if (!r) return "—";
@@ -88,7 +89,7 @@ export function VerdictCard({
             className="mt-[var(--space-2)] text-[var(--text-sm)] leading-relaxed"
             style={{ color: "var(--color-text-muted)" }}
           >
-            {verdict.one_line_verdict}
+            {stripLatex(verdict.one_line_verdict)}
           </p>
         )}
       </div>
@@ -157,7 +158,7 @@ export function VerdictCard({
                         : "var(--color-text-faint)",
                   }}
                 />
-                <span>{ci.issue}</span>
+                <span>{stripLatex(ci.issue || "")}</span>
               </li>
             ))}
           </ul>

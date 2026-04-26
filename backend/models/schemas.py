@@ -151,6 +151,10 @@ class AutoApplyPatch(BaseModel):
     diff: str
     category: Literal["citation", "typo", "notation", "caption", "phrasing"]
     status: Literal["pending", "applied", "rejected", "requires_manual_review"] = "pending"
+    # Rough PDF page index where the patched text lives — lets the UI
+    # zoom + flash the target page when the user clicks "Apply". Fix
+    # Agent estimates this from section ordering.
+    page_hint: Optional[int] = None
 
 
 class FixHint(BaseModel):

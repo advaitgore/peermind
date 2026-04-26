@@ -312,6 +312,24 @@ async def _apply_patch_and_recompile(job_id: str, patch: Patch) -> dict[str, Any
     )
     result = apply_unified_diff(tex_path, patch.diff)
     if not result.applied:
+        # Fire compile_error so the UI timeline flips to the red ✗ state
+        # instead of staying stuck at "Locating". The frontend LiveEditTimeline
+        # already handles compile_error with a Retry button.
+        await bus.publish(
+            job_id,
+            ReviewEvent(
+                event_type="compile_error",
+                agent="fix_agent",
+                data={
+                    "log": (
+                        f"Patch couldn't apply ({result.reason}). "
+                        "The surrounding text may have been changed by a prior edit. "
+                        "Open the source editor to apply this change manually."
+                    ),
+                    "patch_id": patch.id,
+                },
+            ),
+        )
         return {"applied": False, "reason": result.reason, "detail": result.log}
 
     # Step 3 — compiling.

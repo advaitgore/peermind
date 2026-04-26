@@ -443,6 +443,56 @@ async def _synthesize_verdict(
 # ---------- Fix Agent (patches + action plan) ----------
 
 
+import re as _re
+
+
+def _page_hint_from_diff(diff: str, total_source_lines: int, pdf_page_count: int) -> int | None:
+    """Estimate the PDF page where a unified diff lands.
+
+    Parses the first `@@ -LINE,...` hunk header and maps the source line
+    onto a PDF page using the known total source-line count and PDF page
+    count. Much more accurate than Fix Agent's hand-wavy section estimate.
+    """
+    if not diff or total_source_lines <= 0 or pdf_page_count <= 0:
+        return None
+    m = _re.search(r"@@ -(\d+)", diff)
+    if not m:
+        return None
+    source_line = int(m.group(1))
+    return max(1, min(pdf_page_count, round(source_line / total_source_lines * pdf_page_count)))
+
+
+def _count_pdf_pages(job_id: str) -> int:
+    """Return the PDF page count for the given job's compiled output.
+
+    Uses pypdf (already in requirements) to count pages from the on-disk
+    PDF. Returns 0 if no PDF exists or pypdf is unavailable.
+    """
+    try:
+        from pypdf import PdfReader
+        from ..config import get_settings
+        from ..models.database import Job
+        import sqlite3
+
+        settings = get_settings()
+        # Can't use async DB here (called via asyncio.to_thread) — use
+        # sqlite3 directly for the one-row lookup.
+        db_path = str(settings.database_url).replace("sqlite+aiosqlite:///", "")
+        conn = sqlite3.connect(db_path, timeout=5)
+        row = conn.execute("SELECT pdf_path FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return 0
+        from pathlib import Path
+        pdf_path = Path(row[0])
+        if not pdf_path.is_file():
+            return 0
+        reader = PdfReader(str(pdf_path))
+        return len(reader.pages)
+    except Exception:
+        return 0
+
+
 async def _run_fix_agent(
     job_id: str,
     paper_source: str,
@@ -455,13 +505,68 @@ async def _run_fix_agent(
     spec = build_fix_agent_spec()
     user_msg = build_fix_user_message(paper_source, verdict, all_reviews, lit, code, main_tex_name)
     out = await factory.run_session(spec, user_msg)
-    parsed = extract_json(out) or {"auto_apply_patches": [], "author_required": []}
-    # Always regenerate patch_ids. The model sometimes pattern-matches the
-    # "p_<8-hex>" placeholder in the skill prompt and returns sequential
-    # values like p_a1b2c3d4 that collide across runs → UNIQUE constraint
-    # failures at insert time. IDs are backend-only; the UI never sees them.
-    for p in parsed.get("auto_apply_patches", []):
+    raw = extract_json(out)
+    if raw is None:
+        # Parse failed — almost always truncation. Breadcrumb so we can
+        # diagnose on the next iteration instead of silently returning
+        # an empty action plan.
+        tail = (out or "")[-400:].replace("\n", "\\n")
+        print(
+            f"[fix_agent] extract_json returned None (output {len(out or '')} chars). "
+            f"Tail: {tail!r}",
+            flush=True,
+        )
+    parsed = raw or {"auto_apply_patches": [], "author_required": []}
+
+    # The model sometimes drops the wrapper and returns one of:
+    #   {"diff": ..., "description": ..., "category": ...}          (single patch)
+    #   [{"diff": ...}, {"diff": ...}, ...]                         (list of patches)
+    # Reshape either into the expected {auto_apply_patches: [...]} wrapper.
+    if isinstance(parsed, list):
+        parsed = {"auto_apply_patches": list(parsed), "author_required": []}
+    elif isinstance(parsed, dict) and "auto_apply_patches" not in parsed and "author_required" not in parsed:
+        keys = set(parsed.keys())
+        if "diff" in keys and ("description" in keys or "category" in keys):
+            parsed = {"auto_apply_patches": [parsed], "author_required": []}
+        else:
+            parsed = {"auto_apply_patches": [], "author_required": []}
+
+    ap_count = len(parsed.get("auto_apply_patches") or [])
+    ar_count = len(parsed.get("author_required") or [])
+    if ap_count == 0 and ar_count == 0:
+        # Parse succeeded but both lists empty — model decided to emit
+        # nothing, or the JSON had the shape but missing both arrays.
+        print(
+            f"[fix_agent] action plan empty after parse (parsed_keys="
+            f"{list(parsed.keys())}). Paper title: {main_tex_name!r}.",
+            flush=True,
+        )
+    # Always regenerate patch_ids.
+    for p in parsed.get("auto_apply_patches") or []:
         p["patch_id"] = "p_" + uuid.uuid4().hex[:10]
+
+    # Override Fix Agent's page_hint estimates with values derived from
+    # the actual diff hunk line numbers. Fix Agent's guesses are often
+    # wrong; hunk lines + pypdf page count gives exact accuracy.
+    total_source_lines = len(paper_source.splitlines())
+    pdf_page_count = await asyncio.to_thread(_count_pdf_pages, job_id)
+    if total_source_lines > 0 and pdf_page_count > 0:
+        for p in parsed.get("auto_apply_patches") or []:
+            ph = _page_hint_from_diff(p.get("diff", ""), total_source_lines, pdf_page_count)
+            if ph:
+                p["page_hint"] = ph
+        for a in parsed.get("author_required") or []:
+            # Derive from fix_hint diff if present, otherwise keep Fix Agent's guess.
+            fh_diff = (a.get("fix_hint") or {}).get("diff", "")
+            if fh_diff:
+                ph = _page_hint_from_diff(fh_diff, total_source_lines, pdf_page_count)
+                if ph:
+                    a["page_hint"] = ph
+            elif not a.get("page_hint"):
+                # Fall back to tex_line_hint if available.
+                tex_line = a.get("tex_line_hint")
+                if tex_line:
+                    a["page_hint"] = max(1, round(tex_line / total_source_lines * pdf_page_count))
     return parsed
 
 
@@ -685,6 +790,7 @@ async def run_review_pipeline(
                         "description": p.get("description", ""),
                         "category": p.get("category", "phrasing"),
                         "diff": p.get("diff", ""),
+                        "page_hint": p.get("page_hint"),
                     },
                 ),
             )
